@@ -1,0 +1,7 @@
+{{- /* Namespace shared by every namespaced object in this chart. */ -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/part-of: mist

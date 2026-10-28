@@ -1,0 +1,79 @@
+# Postgres for mist-api flow history and alerts.
+# Dev-grade: single replica, ephemeral storage. Production would use a
+# managed database or PVC-backed StatefulSet with backups.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mist-postgres
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-postgres
+    app.kubernetes.io/part-of: mist
+stringData:
+  username: mist
+  # Dev-only credential. Override for any shared environment.
+  password: mist-dev-password
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mist-postgres
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-postgres
+    app.kubernetes.io/part-of: mist
+spec:
+  serviceName: mist-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mist-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mist-postgres
+        app.kubernetes.io/part-of: mist
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mist-postgres
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mist-postgres
+                  key: password
+            - name: POSTGRES_DB
+              value: mist
+            # Postgres 18+ images require PGDATA in a versioned subdirectory
+            # (see docker-library/postgres#1259); mount at the parent.
+            - name: PGDATA
+              value: /var/lib/postgresql/18/docker
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mist-postgres
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-postgres
+    app.kubernetes.io/part-of: mist
+spec:
+  selector:
+    app.kubernetes.io/name: mist-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

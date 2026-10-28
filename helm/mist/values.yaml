@@ -1,0 +1,72 @@
+# Default values for the mist chart. Every value below maps to a field the
+# underlying manifests already use — see deploy/*.yaml for the plain-manifest
+# equivalents.
+
+# Namespace for every namespaced object (also created by templates/namespace.yaml).
+namespace: mist
+
+agent:
+  # The operator renders and owns the mist-agent DaemonSet from the
+  # TrafficMonitor CR (field manager "mist-operator"). Leave this false so the
+  # chart does not install a second DaemonSet that would fight the operator.
+  # Set true ONLY for operator-less setups (bare-metal dev without the
+  # controller); the operator will adopt/replace it once installed.
+  enabled: false
+  image: mist-agent:dev
+  # Must match the DaemonSet the operator renders
+  # (crates/mist-operator/testdata/agent-daemonset.yaml).
+  hostNetwork: true
+  privileged: true
+  apiUrl: http://mist-api.mist.svc.cluster.local:3000
+  intervalSecs: 5
+  objectPath: /etc/mist/mist-ebpf.o
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+api:
+  image: mist-api:dev
+  replicaCount: 1
+  # Empty means in-memory storage (alerts/flows lost on restart). Set to a
+  # Postgres URL for persistence; the bundled Postgres fills this in.
+  databaseUrl: ""
+  operatorWebhookUrl: http://mist-operator.mist.svc.cluster.local:8081/alerts
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+operator:
+  image: mist-operator:dev
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+postgres:
+  enabled: true
+  image: postgres:17-alpine
+  auth:
+    username: mist
+    # Dev-only default. Override with --set for any shared environment.
+    password: mist-dev-password
+    database: mist
+  persistence:
+    # False keeps the current dev behavior (emptyDir, data lost on restart).
+    enabled: false
+    size: 10Gi
+    storageClassName: ""

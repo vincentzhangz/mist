@@ -1,0 +1,32 @@
+# Rust build outputs (kept out of every image context).
+target/
+**/target/
+
+# eBPF build scratch (the .o is COPYed explicitly by name, never whole dirs).
+*.o
+*.d
+
+# Cargo lockfiles for scratch/vendor work (workspace Cargo.lock is committed).
+.cargo/
+vendor/
+
+# Local env / secrets — never bake into an image.
+.env
+*.pem
+*.key
+
+# Editor and OS noise.
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Docs and CI stay out of the runtime image.
+README.md
+docs/
+helm/
+.github/
+deploy/

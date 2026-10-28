@@ -1,0 +1,65 @@
+# Golden fixture for `desired_daemonset` with a default `TrafficMonitorSpec`.
+# NOT applied to the cluster (the operator owns the live DaemonSet).
+# Pinned by `reconcile::tests::matches_golden_fixture`; update both together.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mist-agent
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mist-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mist-agent
+        app.kubernetes.io/part-of: mist
+    spec:
+      serviceAccountName: mist-agent
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # eBPF needs privileged + hostNetwork (kept); only seccomp is hardened.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector: {}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: mist-agent:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RUST_LOG
+              value: info
+            - name: MIST_WATCHED_NAMESPACES
+              value: ""
+          args:
+            - --object=/etc/mist/mist-ebpf.o
+            - --api-url=http://mist-api.mist.svc.cluster.local:3000
+            - --interval-secs=5
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys

@@ -1,0 +1,47 @@
+# Minimal RBAC for mist-agent: read pods (IP attribution) and nodes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mist
+  labels:
+    app.kubernetes.io/part-of: mist
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mist-agent
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mist-agent
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mist-agent
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+subjects:
+  - kind: ServiceAccount
+    name: mist-agent
+    namespace: mist
+roleRef:
+  kind: ClusterRole
+  name: mist-agent
+  apiGroup: rbac.authorization.k8s.io

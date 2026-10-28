@@ -1,0 +1,45 @@
+{{- /* Operator RBAC. Mirrors deploy/operator-rbac.yaml (minus the Namespace). */ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mist-operator
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-operator
+    app.kubernetes.io/part-of: mist
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mist-operator
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-operator
+    app.kubernetes.io/part-of: mist
+rules:
+  - apiGroups: ["mist.io"]
+    resources: ["trafficmonitors", "anomalyalerts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["mist.io"]
+    resources: ["trafficmonitors/status", "anomalyalerts/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mist-operator
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-operator
+    app.kubernetes.io/part-of: mist
+subjects:
+  - kind: ServiceAccount
+    name: mist-operator
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: Role
+  name: mist-operator
+  apiGroup: rbac.authorization.k8s.io

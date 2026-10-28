@@ -1,0 +1,43 @@
+{{- /* Agent RBAC. Always installed: the operator-rendered DaemonSet runs as
+       the mist-agent ServiceAccount, so this must exist even though the
+       static DaemonSet below defaults to disabled. Mirrors
+       deploy/agent-rbac.yaml (minus the Namespace, which has its own template). */ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mist-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mist-agent
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mist-agent
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+subjects:
+  - kind: ServiceAccount
+    name: mist-agent
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: mist-agent
+  apiGroup: rbac.authorization.k8s.io

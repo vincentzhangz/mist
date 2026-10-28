@@ -1,0 +1,6 @@
+# Applies when cargo runs with this crate directory as cwd.
+[build]
+target = "bpfel-unknown-none"
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"

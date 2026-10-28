@@ -1,0 +1,39 @@
+name: e2e-kind
+
+# EXPERIMENTAL / BEST-EFFORT: the e2e loop needs a Linux runner with
+# kernel BTF for the eBPF sensor, and several images are still :dev
+# placeholders (see README production-gaps). This workflow proves the
+# install path and the operator's DaemonSet rendering; sensor traffic
+# assertions land with Phase 4. Failures here do not gate merges.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 0" # weekly, Sundays 06:00 UTC
+
+jobs:
+  kind-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true # experimental: report, don't gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mist
+      - name: Apply manifests in install order
+        run: |
+          kubectl apply -f deploy/agent-rbac.yaml -f deploy/operator-rbac.yaml
+          kubectl apply -f deploy/crds/
+          kubectl apply -f deploy/postgres.yaml
+          kubectl apply -f deploy/api-deployment.yaml -f deploy/operator-deployment.yaml
+          kubectl apply -f deploy/samples/
+      - name: Assert CRDs exist
+        run: |
+          kubectl wait --for=condition=Established crd/trafficmonitors.mist.io --timeout=60s
+          kubectl wait --for=condition=Established crd/anomalyalerts.mist.io --timeout=60s
+          kubectl get crd trafficmonitors.mist.io anomalyalerts.mist.io
+      - name: Assert operator and API roll out
+        run: |
+          kubectl -n mist rollout status deployment/mist-operator --timeout=180s
+          kubectl -n mist rollout status deployment/mist-api --timeout=180s
+          kubectl -n mist get trafficmonitor default

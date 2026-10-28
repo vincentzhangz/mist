@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  # Hermetic toolchain install so parallel checkouts never share state.
+  RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
+  CARGO_HOME: ${{ github.workspace }}/.cargo-home
+
+jobs:
+  userspace:
+    name: userspace build/test/clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          rustup --version >/dev/null 2>&1 || \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          rustup toolchain install stable --component clippy
+          rustup default stable
+      - name: Build workspace
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo build --workspace
+      - name: Test workspace
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo test --workspace
+      - name: Clippy (pedantic, deny warnings)
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo clippy --workspace --all-targets -- -D warnings
+
+  ebpf:
+    name: eBPF cross-compile (nightly + bpf-linker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain with rust-src
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          rustup --version >/dev/null 2>&1 || \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          rustup toolchain install nightly --component rust-src
+      - name: Install prebuilt bpf-linker
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo +nightly install bpf-linker
+      - name: Build mist-ebpf for bpfel-unknown-none
+        working-directory: crates/mist-ebpf
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          # Target + linker come from crates/mist-ebpf/.cargo/config.toml;
+          # build-std=core is required for the BPF target on nightly.
+          cargo +nightly build -Z build-std=core
+
+  dashboard:
+    name: dashboard (trunk WASM build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install trunk
+        # Pinned trunk release; wasm target needed for the Leptos CSR app.
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          rustup --version >/dev/null 2>&1 || \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          rustup target add wasm32-unknown-unknown
+          cargo install trunk --locked
+      - name: Build dashboard bundle
+        # NOTE: red until the dashboard owner lands Trunk.toml + index.html
+        # (Phase 4; crates/ is owned by another workstream — see README roadmap).
+        working-directory: crates/mist-dashboard
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          trunk build --release
+
+  helm:
+    name: helm lint + template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint chart
+        run: helm lint helm/mist
+      - name: Template default values
+        run: helm template mist helm/mist --namespace mist --include-crds > /tmp/mist-default.yaml
+      - name: Template operator-less agent variant
+        run: helm template mist helm/mist --namespace mist --set agent.enabled=true > /tmp/mist-agent.yaml
+      - name: Template external-db variant
+        run: >-
+          helm template mist helm/mist --namespace mist
+          --set postgres.enabled=false
+          --set api.databaseUrl=postgres://mist:secret@db.internal:5432/mist
+          > /tmp/mist-external-db.yaml
+      - name: Dry-run install against a cluster-less kubeconform check
+        # Fails the job if any rendered document is not valid Kubernetes YAML.
+        run: |
+          helm template mist helm/mist --namespace mist --include-crds > /tmp/mist-all.yaml
+          python3 -c "import yaml,sys; list(yaml.safe_load_all(open('/tmp/mist-all.yaml'))); print('all documents parse')"

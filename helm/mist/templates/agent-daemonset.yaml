@@ -1,0 +1,65 @@
+{{- /* Standalone agent DaemonSet for operator-less setups ONLY.
+       Disabled by default: with the operator installed, the controller renders
+       this same DaemonSet from the TrafficMonitor CR and a static copy would
+       fight it (server-side apply, field manager "mist-operator"). Shape
+       mirrors crates/mist-operator/testdata/agent-daemonset.yaml. */ -}}
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mist-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-agent
+    app.kubernetes.io/part-of: mist
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mist-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mist-agent
+        app.kubernetes.io/part-of: mist
+    spec:
+      serviceAccountName: mist-agent
+      hostNetwork: {{ .Values.agent.hostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+      # eBPF needs privileged + hostNetwork (kept below); only seccomp is
+      # hardened here, mirroring the operator-rendered DaemonSet.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector: {{ .Values.agent.nodeSelector | toJson }}
+      tolerations:
+        {{- .Values.agent.tolerations | toYaml | nindent 8 }}
+      containers:
+        - name: agent
+          image: {{ .Values.agent.image | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: {{ .Values.agent.privileged }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RUST_LOG
+              value: info
+            - name: MIST_WATCHED_NAMESPACES
+              value: ""
+          args:
+            - --object={{ .Values.agent.objectPath }}
+            - --api-url={{ .Values.agent.apiUrl }}
+            - --interval-secs={{ .Values.agent.intervalSecs }}
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+          resources:
+            {{- .Values.agent.resources | toYaml | nindent 12 }}
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+{{- end }}

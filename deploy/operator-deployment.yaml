@@ -1,0 +1,73 @@
+# mist-operator Deployment + Service (the Service fronts the alert webhook
+# that mist-api calls). Image is a placeholder until the container build
+# lands (Phase 5); for local dev, run `cargo run -p mist-operator`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mist-operator
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-operator
+    app.kubernetes.io/part-of: mist
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mist-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mist-operator
+        app.kubernetes.io/part-of: mist
+    spec:
+      serviceAccountName: mist-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: mist-operator:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          args:
+            - --webhook-addr=0.0.0.0:8081
+          ports:
+            - containerPort: 8081
+          env:
+            - name: OPERATOR_NAMESPACE
+              value: mist
+            - name: RUST_LOG
+              value: info
+          # TCP probe: the operator serves only the /alerts webhook
+          # (crates/mist-operator/src/webhook.rs); there is no /healthz.
+          livenessProbe:
+            tcpSocket:
+              port: 8081
+          readinessProbe:
+            tcpSocket:
+              port: 8081
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mist-operator
+  namespace: mist
+  labels:
+    app.kubernetes.io/name: mist-operator
+    app.kubernetes.io/part-of: mist
+spec:
+  selector:
+    app.kubernetes.io/name: mist-operator
+  ports:
+    - port: 8081
+      targetPort: 8081

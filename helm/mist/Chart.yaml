@@ -1,0 +1,16 @@
+apiVersion: v2
+name: mist
+description: eBPF network-anomaly sensing for Kubernetes (agent + API + operator + Postgres)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# Self-contained: no external chart dependencies. CRDs ship as static
+# manifests under crds/ (copies of deploy/crds/*.yaml), installed by Helm
+# on `helm install` before any template.
+keywords:
+  - ebpf
+  - networking
+  - anomaly-detection
+  - kubernetes
+maintainers:
+  - name: mist contributors

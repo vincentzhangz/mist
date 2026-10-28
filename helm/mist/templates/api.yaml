@@ -1,0 +1,87 @@
+{{- /* mist-api Deployment + Service. DATABASE_URL is required for persistence;
+       when postgres.enabled the bundled StatefulSet fills it in, otherwise
+       set api.databaseUrl explicitly (empty = ephemeral in-memory store). */ -}}
+{{- $databaseUrl := .Values.api.databaseUrl }}
+{{- if and (empty $databaseUrl) .Values.postgres.enabled }}
+{{- $databaseUrl = printf "postgres://$(PGUSER):$(PGPASSWORD)@mist-postgres.%s.svc.cluster.local:5432/%s" .Values.namespace .Values.postgres.auth.database }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mist-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-api
+    app.kubernetes.io/part-of: mist
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mist-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mist-api
+        app.kubernetes.io/part-of: mist
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ .Values.api.image | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 3000
+          env:
+            {{- if .Values.postgres.enabled }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: mist-postgres
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mist-postgres
+                  key: password
+            {{- end }}
+            {{- if $databaseUrl }}
+            - name: DATABASE_URL
+              value: {{ $databaseUrl | quote }}
+            {{- end }}
+            - name: OPERATOR_WEBHOOK_URL
+              value: {{ .Values.api.operatorWebhookUrl | quote }}
+            - name: BIND_ADDR
+              value: 0.0.0.0:3000
+            - name: RUST_LOG
+              value: info
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+          resources:
+            {{- .Values.api.resources | toYaml | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mist-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: mist-api
+    app.kubernetes.io/part-of: mist
+spec:
+  selector:
+    app.kubernetes.io/name: mist-api
+  ports:
+    - port: 3000
+      targetPort: 3000

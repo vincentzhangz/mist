@@ -1,0 +1,13 @@
+# Default TrafficMonitor: the operator renders the agent DaemonSet from this.
+apiVersion: mist.io/v1
+kind: TrafficMonitor
+metadata:
+  name: default
+  namespace: mist
+spec:
+  watchedNamespaces: []
+  sampleIntervalSecs: 5
+  agentImage: mist-agent:dev
+  nodeSelector: {}
+  apiUrl: http://mist-api.mist.svc.cluster.local:3000
+  objectPath: /etc/mist/mist-ebpf.o

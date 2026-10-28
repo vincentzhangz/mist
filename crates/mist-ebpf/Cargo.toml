@@ -1,0 +1,32 @@
+[package]
+name = "mist-ebpf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+aya-ebpf = "0.2"
+mist-flow = { path = "../mist-flow" }
+
+# eBPF programs cannot unwind: any panic path becomes a trap stub that can
+# break program loading. Debug assertions (including `debug_assert`-based
+# unsafe preconditions) are therefore off: real bugs must surface as
+# verifier rejections or wrong behavior in testing, not as trap stubs.
+# Overflow checks stay on so accidental wrapping arithmetic fails loudly
+# at load time instead of silently wrapping; all intentional wrapping
+# uses explicit `wrapping_*` calls.
+[profile.dev]
+debug = 2
+debug-assertions = false
+overflow-checks = true
+
+[profile.release]
+debug = 2
+debug-assertions = false
+overflow-checks = true
+
+# Detached from the root workspace: this crate only builds for
+# bpfel-unknown-none with nightly + build-std (see .cargo/config.toml).
+[workspace]
