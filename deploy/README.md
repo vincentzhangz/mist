@@ -25,8 +25,16 @@ kubectl apply -f deploy/crds/
 # 3. Postgres for flow/alert history (dev-grade: emptyDir storage).
 kubectl apply -f deploy/postgres.yaml
 
-# 4. API + operator (images are :dev placeholders until containers land;
-#    for local dev, run the binaries with cargo instead — see below).
+# 4. API + operator. The :dev tags are never pulled (IfNotPresent), so
+#    build and kind-load them first (host-built eBPF object + trunk
+#    bundle are COPYd into the images):
+(cd crates/mist-ebpf && cargo +nightly build -Z build-std=core --release)
+cp crates/mist-ebpf/target/bpfel-unknown-none/release/mist-ebpf mist-ebpf.o
+(cd crates/mist-dashboard && trunk build --release)
+docker build -t mist-api:dev -f docker/api.Dockerfile .
+docker build -t mist-operator:dev -f docker/operator.Dockerfile .
+docker build -t mist-agent:dev -f docker/agent.Dockerfile --build-arg EBPF_OBJECT=mist-ebpf.o .
+kind load docker-image mist-api:dev mist-operator:dev mist-agent:dev --name mist
 kubectl apply -f deploy/api-deployment.yaml -f deploy/operator-deployment.yaml
 
 # 5. Default monitor (the operator renders the agent DaemonSet from this).
@@ -77,12 +85,19 @@ it. Set it `true` only for operator-less setups.
 ## Port-forwards
 
 ```sh
-kubectl -n mist port-forward svc/mist-api 3000:3000 &       # REST + WebSocket
+kubectl -n mist port-forward svc/mist-api 3000:3000 &       # REST + WS + dashboard
 kubectl -n mist port-forward svc/mist-postgres 5432:5432 &  # direct DB access
 curl localhost:3000/healthz                                 # -> ok
-curl localhost:3000/api/flows
-curl localhost:3000/api/alerts
-# WebSocket: any WS client against ws://localhost:3000/api/ws (no token today)
+curl localhost:3000/metrics | head -20                      # public Prometheus scrape
+# Dashboard: http://localhost:3000/login (seed an admin first — see below).
+# REST needs a JWT (login first); the WS token travels in ?token=:
+TOKEN=$(curl -s -X POST localhost:3000/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"admin@example.com","password":"..."}' | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+curl -H "authorization: Bearer $TOKEN" localhost:3000/api/flows | head -c 300; echo
+curl -H "authorization: Bearer $TOKEN" localhost:3000/api/alerts | head -c 300; echo
+# WebSocket: any WS client against "ws://localhost:3000/api/ws?token=$TOKEN"
 ```
 
 ## Local-dev binaries (no images needed)
@@ -94,17 +109,40 @@ against the in-cluster Postgres:
 kubectl -n mist port-forward svc/mist-postgres 5432:5432 &
 DATABASE_URL=postgres://mist:mist-dev-password@localhost:5432/mist \
 OPERATOR_WEBHOOK_URL=http://localhost:8081/alerts \
-  cargo run -p mist-api
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=dev-only \
+JWT_SECRET=dev-only \
+  cargo run -p mist-api   # JWT_SECRET is required (any value for local dev)
 cargo run -p mist-operator   # needs kube context; watches OPERATOR_NAMESPACE (default mist)
 ```
 
-## Seeding (no login exists)
+## Seeding auth
 
-There is no authentication and no seeded admin yet — every API endpoint is
-open by design for now (see `docs/auth.md`). Do not expose `mist-api`
-beyond localhost forwards. The only seed credential is the dev Postgres
+Login is live (`docs/auth.md`), but the manifests intentionally ship no
+credentials — the API pod blocks until the `mist-api-auth` Secret exists
+and refuses to start without `JWT_SECRET`. Copy the template (gitignored),
+fill it in, and apply it right after the workloads:
+
+```sh
+cp deploy/api-auth-secret.example deploy/api-auth-secret.yaml
+$EDITOR deploy/api-auth-secret.yaml   # jwt-secret, admin-*, ingest-token
+kubectl apply -f deploy/api-auth-secret.yaml
+```
+
+Or create it imperatively for a dev cluster:
+
+```sh
+kubectl -n mist create secret generic mist-api-auth \
+  --from-literal=jwt-secret="$(openssl rand -hex 32)" \
+  --from-literal=admin-email=admin@example.com \
+  --from-literal=admin-password='s3cret-for-kind' \
+  --from-literal=ingest-token='kind-ingest-token'
+```
+
+Missing/empty admin keys fail login closed (401 for everyone); a missing
+`ingest-token` key leaves `/api/ingest` open (dev only — the agents from
+the default sample then also send no token). Also replace the dev Postgres
 password (`mist-dev-password` in `deploy/postgres.yaml`, overridable via
-`postgres.auth.password` in the chart); replace it anywhere shared.
+`postgres.auth.password` in the chart).
 
 ## Probes
 

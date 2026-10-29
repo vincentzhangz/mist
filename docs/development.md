@@ -2,9 +2,12 @@
 
 ## Prerequisites
 
-- Rust stable (workspace pins `rust-version = "1.85"`, edition 2024) plus
+- Rust stable (workspace pins `rust-version = "1.98"`, edition 2024;
+  CI and Dockerfiles pin the exact toolchain `1.99.1`/`1.99`) plus
   a **nightly** toolchain with `rust-src` for `crates/mist-ebpf`, and the
   `bpf-linker` linker (`cargo +nightly install bpf-linker`).
+- `trunk` 0.22.1 + `wasm32-unknown-unknown` target for the dashboard
+  bundle (`cd crates/mist-dashboard && trunk build --release`).
 - Linux for anything eBPF: the sensor cannot build or run on macOS.
   Use a Linux VM (e.g. Lima) or a Linux dev machine.
 - `kind` (or Docker/Colima) + `kubectl` for the cluster loop. The local
@@ -44,7 +47,15 @@ cargo run -p mist-operator -- --print-crds > /tmp/crds.yaml
 kubectl -n mist port-forward svc/mist-postgres 5432:5432 &
 DATABASE_URL=postgres://mist:mist-dev-password@localhost:5432/mist \
   OPERATOR_WEBHOOK_URL=http://localhost:8081/alerts \
+  ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=dev-only \
+  JWT_SECRET=dev-only \
+  BIND_ADDR=127.0.0.1:3000 \
   cargo run -p mist-api
+# JWT_SECRET is required (any value for local dev); unset INGEST_TOKEN
+# leaves /api/ingest open.
+# The API serves the dashboard from crates/mist-dashboard/dist when the
+# trunk bundle exists there (API-only mode otherwise); open
+# http://127.0.0.1:3000/login with the admin above.
 ```
 
 ## Linux VM notes

@@ -38,7 +38,11 @@ as `AnomalyAlert` custom resources.
    resolve/re-fire never wipes it; the webhook and dashboard already carry
    the optional field. A future LLM implementation only implements the
    trait and wires it into `run_analyzer` in `main` — no new env vars,
-   no detector/store/webhook changes.
+   no detector/store/webhook changes. Wiring (channels, storage, webhook,
+   config, metrics) travels as one `analyzer::AnalyzerDeps` struct.
+   Observability is a public `GET /metrics` (Prometheus exposition, no
+   extra crates): ingest/persist/fire counters plus live storage gauges
+   (`mist_api_flows_stored`, `mist_api_alerts_{firing,resolved}`).
 3. **Operator** (`crates/mist-operator`). Watches `TrafficMonitor` in
    `OPERATOR_NAMESPACE` (default `mist`); renders the `mist-agent`
    DaemonSet from the **oldest** instance (extras marked `Superseded`);
@@ -47,9 +51,14 @@ as `AnomalyAlert` custom resources.
    `--webhook-addr`, default `0.0.0.0:8081`) mirrors analyzer findings as
    `AnomalyAlert` CRs, deduplicated by alert id, with status
    (first/last-seen, occurrences) written via a dedicated status patch.
-4. **Dashboard** (`crates/mist-dashboard`). Leptos CSR skeleton (Phase 4
-   builds the real views). It is **not** served by the API today — the API
-   has no static-file serving; the bundle consumes the JSON API separately.
+4. **Dashboard** (`crates/mist-dashboard`). Leptos 0.8 CSR app with
+   real views: `/login` (email+password), `/` (flows table with live WS
+   prepend), `/alerts` (filterable list + detail + resolve), behind an
+   auth-guarded shell with header nav, WS status dot, and logout. The API
+   serves the trunk bundle from `SERVE_DIR` (default
+   `crates/mist-dashboard/dist`, baked at `/srv/dashboard` in the image)
+   with `index.html` fallback for client routes; unknown `/api/*` paths
+   stay JSON 404s.
 
 ## eBPF TC design
 
@@ -79,7 +88,9 @@ as `AnomalyAlert` custom resources.
   `sampleIntervalSecs` (default 5), `agentImage` (default
   `mist-agent:dev`), `nodeSelector`, `apiUrl` (default
   `http://mist-api.mist.svc.cluster.local:3000`), `objectPath` (default
-  `/etc/mist/mist-ebpf.o`). Status: `Pending`/`Ready`/`Superseded`.
+  `/etc/mist/mist-ebpf.o`), `apiTokenSecretName` (optional; the Secret's
+  `ingest-token` key becomes the agent's `MIST_API_TOKEN`). Status:
+  `Pending`/`Ready`/`Superseded`.
 - `AnomalyAlert` (`anomalyalerts.mist.io`): `alertId`, `severity`
   (`info`/`warning`/`critical`), `title`, `detail`, optional `explanation`,
   `workloadNamespace`/`workloadName`, `attributes`. Status: `state`

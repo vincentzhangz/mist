@@ -32,7 +32,7 @@ TC/drain design, panic-freedom rule, and CRD reference.
 
 ## Prerequisites
 
-- Rust stable (workspace `rust-version = "1.85"`); **nightly** + `rust-src`
+- Rust stable (workspace `rust-version = "1.98"`); **nightly** + `rust-src`
   + `bpf-linker` for the eBPF crate; Linux for anything sensor-related.
 - `kind` (or Docker/Colima) + `kubectl` for the local cluster.
 - `helm` for the chart path; `trunk` + `wasm32-unknown-unknown` for the
@@ -41,22 +41,40 @@ TC/drain design, panic-freedom rule, and CRD reference.
 ## Quickstart (kind)
 
 ```sh
-# 1. Cluster + manifests (order matters).
+# 1. Cluster.
 kind create cluster --name mist
+
+# 2. Build images + load them (manifests reference :dev, never pulled).
+(cd crates/mist-ebpf && cargo +nightly build -Z build-std=core --release)
+cp crates/mist-ebpf/target/bpfel-unknown-none/release/mist-ebpf mist-ebpf.o
+(cd crates/mist-dashboard && trunk build --release)
+docker build -t mist-api:dev -f docker/api.Dockerfile .
+docker build -t mist-operator:dev -f docker/operator.Dockerfile .
+docker build -t mist-agent:dev -f docker/agent.Dockerfile --build-arg EBPF_OBJECT=mist-ebpf.o .
+kind load docker-image mist-api:dev mist-operator:dev mist-agent:dev --name mist
+
+# 3. Manifests (order matters).
 kubectl apply -f deploy/agent-rbac.yaml -f deploy/operator-rbac.yaml
 kubectl apply -f deploy/crds/
 kubectl apply -f deploy/postgres.yaml
 kubectl apply -f deploy/api-deployment.yaml -f deploy/operator-deployment.yaml
 kubectl apply -f deploy/samples/
 
-# 2. Wait for the control plane; the operator renders the agent DaemonSet.
+# 4. Wait for the control plane; the operator renders the agent DaemonSet.
 kubectl -n mist rollout status deployment/mist-operator --timeout=180s
 kubectl -n mist rollout status deployment/mist-api --timeout=180s
 kubectl -n mist get daemonset mist-agent
 
-# 3. API + dashboard.
+# 5. Provision auth (API pod blocks until this exists) + API/dashboard.
+kubectl -n mist create secret generic mist-api-auth \
+  --from-literal=jwt-secret="$(openssl rand -hex 32)" \
+  --from-literal=admin-email=admin@example.com \
+  --from-literal=admin-password='s3cret-for-kind' \
+  --from-literal=ingest-token='kind-ingest-token'
+kubectl -n mist rollout status deployment/mist-api --timeout=180s
 kubectl -n mist port-forward svc/mist-api 3000:3000 &
 curl localhost:3000/healthz   # -> ok
+# Dashboard: open http://localhost:3000/login with the admin above.
 ```
 
 Or install via Helm (self-contained, no external chart deps):
@@ -76,8 +94,10 @@ Email + password login. `POST /api/auth/login` issues an HS256 JWT
 (24h); send it as `Authorization: Bearer` on REST and as `?token=` on
 `/api/ws`. Bootstrap the first user with `ADMIN_EMAIL`/`ADMIN_PASSWORD`
 (the API hashes and upserts it at startup); without them login fails
-closed. `POST /api/ingest` stays public until agent credentials are
-designed — keep the API cluster-local. Details: [docs/auth.md](docs/auth.md).
+closed. Agents authenticate `POST /api/ingest` with the provisioned
+`INGEST_TOKEN` (`Bearer`); unprovisioned ingest stays open (dev only).
+All four come from the `mist-api-auth` Secret in-cluster. Details:
+[docs/auth.md](docs/auth.md).
 
 ## Repo layout
 
@@ -102,8 +122,9 @@ Verified against the code — no invented knobs.
 | `OPERATOR_WEBHOOK_URL` | unset → mirroring disabled | Where scored alerts are POSTed (operator `POST /alerts`) |
 | `BIND_ADDR` | `0.0.0.0:3000` | Listen address |
 | `RUST_LOG` | `info` | Tracing filter |
-| `JWT_SECRET` | unset → insecure dev default + loud warning | HS256 signing key; MUST be set to a random value anywhere shared |
+| `JWT_SECRET` | **required** — API refuses to start without it | HS256 signing key; set to a random value (`openssl rand -hex 32`) |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset → login fails closed (401) | Bootstrap admin, argon2-hashed + upserted at startup |
+| `INGEST_TOKEN` | unset → ingest open + loud warning | Shared agent credential, required as `Bearer` on `/api/ingest` when set |
 | `SERVE_DIR` | `crates/mist-dashboard/dist` | Dashboard bundle dir; missing `index.html` → API-only mode |
 
 Detector tuning is compiled defaults, not env
@@ -118,6 +139,7 @@ CV ≤0.15, mean gap ≥5s.
 | `--iface` (repeatable) | auto-detect up, non-`lo` | Interfaces to attach TC progs to |
 | `--object` | `mist-ebpf.o` | Path to the compiled eBPF object (`/etc/mist/mist-ebpf.o` in-cluster) |
 | `--api-url` | `http://localhost:3000` | Batches POST to `{api-url}/api/ingest` |
+| `--api-token` / `MIST_API_TOKEN` | empty → no header | Bearer token for `/api/ingest` (operator injects from Secret) |
 | `--interval-secs` | `5` | Drain interval |
 | `NODE_NAME` | `/etc/hostname` → `unknown` | Node label on emitted flows |
 | `RUST_LOG` | `info` | Tracing filter |
@@ -127,13 +149,15 @@ CV ≤0.15, mean gap ≥5s.
 `mist`), `--print-crds` (regenerate CRDs). `TrafficMonitor` spec fields:
 `watchedNamespaces`, `sampleIntervalSecs` (5), `agentImage`
 (`mist-agent:dev`), `nodeSelector`, `apiUrl`, `objectPath`
-(`/etc/mist/mist-ebpf.o`).
+(`/etc/mist/mist-ebpf.o`), `apiTokenSecretName` (optional Secret for the
+agent ingest token).
 
 API routes (`crates/mist-api/src/main.rs` `router`): `GET /healthz`,
-`POST /api/auth/login`, `GET /api/flows`, `GET /api/alerts`,
-`GET /api/alerts/{id}`, `POST /api/alerts/{id}/resolve`,
-`POST /api/ingest`, `GET /api/ws`. Unknown `/api/*` paths return a
-JSON 404 (never the dashboard shell). Operator webhook: `POST /alerts`.
+`GET /metrics` (public Prometheus scrape), `POST /api/auth/login`,
+`GET /api/flows`, `GET /api/alerts`, `GET /api/alerts/{id}`,
+`POST /api/alerts/{id}/resolve`, `POST /api/ingest`, `GET /api/ws`.
+Unknown `/api/*` paths return a JSON 404 (never the dashboard shell).
+Operator webhook: `POST /alerts`.
 
 ## Testing
 
@@ -146,19 +170,25 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Production gaps / roadmap (honest)
 
-- **Ingest is still public**: `/api/ingest` takes no credential yet
-  (agent auth is TODO); keep the API cluster-local.
+- **Ingest uses one shared token** (`INGEST_TOKEN`; open when
+  unprovisioned): keep the API cluster-local unless it is set, and prefer
+  per-node credentials or mTLS before treating agents as untrusted. Login
+  has no rate limiting yet — keep a rate-limiting ingress in front of any
+  internet-facing deployment.
 - **Images are `:dev` placeholders** in `deploy/` and chart defaults;
-  nothing here has been pushed to a registry, and the Dockerfiles have
-  only been reviewed, never built (no daemon in this environment).
+  all three Dockerfiles build and were verified kind-loaded (TC attach,
+  REST, dashboard, `/metrics` all proven live), but nothing has been
+  pushed to a registry.
 - **Postgres is dev-grade**: `emptyDir` in `deploy/` (chart default too);
   enable `postgres.persistence` or use a managed DB.
-- **Single replica** API/operator; no TLS, no resource autoscaling, no
-  metrics endpoint; eBPF map sizing under load untested.
-- **Dashboard is CSR-only**: login/flows/alerts views ship, but there is
-  no SSR, no pagination, and no in-browser click-through test yet.
-- **eBPF sensor is Linux-only** and needs BTF ≥5.15 + `clsact`; the kind
-  e2e builds its own images and asserts rollout, not sensor attach.
+- **Single replica** API/operator; no TLS, no resource autoscaling;
+  eBPF map sizing under load untested.
+- **Dashboard is CSR-only**: login/flows/alerts views ship and passed a
+  scripted in-browser proof (login → live flows → alerts → logout), but
+  there is no SSR and no pagination; the proof script isn't committed.
+- **eBPF sensor is Linux-only** and needs BTF ≥5.15 + `clsact`;
+  sensor attach was verified live in kind but is asserted by the
+  workflow only as DaemonSet existence, not TC attach.
 
 ## License
 

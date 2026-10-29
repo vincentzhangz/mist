@@ -12,6 +12,8 @@ Email + password login with HS256 JWTs. Verified against
 - verifies the argon2 hash (in `spawn_blocking`, so hashing never stalls
   the runtime),
 - returns `{ "token", "email" }` on success, `401 { "error" }` otherwise.
+  Unknown users pay one dummy argon2 verification so login timing doesn't
+  reveal which emails exist.
 
 Tokens are HS256, `sub` = email, 24h expiry.
 
@@ -20,11 +22,12 @@ Tokens are HS256, `sub` = email, 24h expiry.
 | Endpoint | Auth |
 |---|---|
 | `GET /healthz` | none |
+| `GET /metrics` | none — public for in-cluster Prometheus scraping |
 | `POST /api/auth/login` | none |
-| `POST /api/ingest` | none — public by design for now (see below) |
+| `POST /api/ingest` | `Authorization: Bearer <INGEST_TOKEN>` when a token is provisioned; open otherwise (dev only, loud warning at startup) |
 | `GET /api/flows`, `GET /api/alerts`, `GET /api/alerts/{id}`, `POST /api/alerts/{id}/resolve` | `Authorization: Bearer <token>` |
 | `GET /api/ws` | `?token=<token>` query param (browsers can't set headers on upgrade) |
-| `/`, `/login`, `/flows`, `/alerts`, assets | none — the dashboard shell is public; it redirects to login without a token |
+| `/`, `/login`, `/alerts`, assets | none — the dashboard shell is public; it redirects to login without a token |
 
 Anything else under `/api/*` returns a JSON 404 (never the SPA shell).
 
@@ -32,14 +35,21 @@ Anything else under `/api/*` returns a JSON 404 (never the SPA shell).
 
 | Var | Effect |
 |---|---|
-| `JWT_SECRET` | HS256 signing key. Unset/empty falls back to an insecure dev default (`dev-secret-change-me`) with a loud startup warning — set a random value anywhere shared. |
+| `JWT_SECRET` | HS256 signing key. **Required** — the API refuses to start without it (fail closed). Set a random value (`openssl rand -hex 32`); local runs just export any value. |
 | `ADMIN_EMAIL` + `ADMIN_PASSWORD` | Bootstrap admin: hashed (argon2) and upserted at every startup. If either is unset, nothing is seeded and login fails closed (401 for everyone). |
+| `INGEST_TOKEN` | Shared agent credential. When set, `/api/ingest` requires it as `Bearer`; when unset, ingest stays open with a loud warning. Agents send `--api-token` / `MIST_API_TOKEN` (the operator injects it from the monitor's `apiTokenSecretName`). Provision a high-entropy value anywhere shared. |
 | `DATABASE_URL` | With Postgres the users table persists (migration `002_auth.sql`); without it the in-memory store still accepts the seeded admin, but users vanish on restart. |
+
+In-cluster all four come from one Secret: `deploy/api-auth-secret.example`
+is the template (copy to the gitignored `api-auth-secret.yaml`), and the
+chart renders it from `api.jwtSecret` / `api.adminEmail` /
+`api.adminPassword` / `api.ingestToken`.
 
 ## Consequences
 
-- Keep `mist-api` cluster-local until agent auth exists: anyone who can
-  reach it can inject fake flow batches via public `/api/ingest`.
+- Keep `mist-api` cluster-local unless `INGEST_TOKEN` is provisioned:
+  without it anyone who can reach the API can inject fake flow batches
+  via `/api/ingest`.
 - The operator webhook (`POST /alerts` on `:8081`) is unauthenticated by
   design and must stay cluster-internal (no external Service/ingress in
   `deploy/` or the chart).
@@ -48,6 +58,7 @@ Anything else under `/api/*` returns a JSON 404 (never the SPA shell).
 
 ## Roadmap (not implemented)
 
-Agent ingest still needs a provisioned credential (per-node token or
-mTLS) — that is the remaining TODO before the API can face anything
-less trusted than the cluster network.
+Ingest uses one shared token today; per-node tokens or mTLS would bound
+the blast radius of a leaked agent credential. Login has no rate
+limiting yet — do not expose it to the open internet without a
+rate-limiting ingress in front.
