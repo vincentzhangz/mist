@@ -13,6 +13,7 @@ futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 mist-types.workspace = true
+rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

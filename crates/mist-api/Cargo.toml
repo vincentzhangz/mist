@@ -13,6 +13,7 @@ futures.workspace = true
 jsonwebtoken.workspace = true
 mist-types.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

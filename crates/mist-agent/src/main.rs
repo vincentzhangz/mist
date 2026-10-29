@@ -29,6 +29,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls auto-detect panics when both ring and aws-lc-rs are enabled (our
+    // tree has both via kube/reqwest/sqlx); pin an explicit process default.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
