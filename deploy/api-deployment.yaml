@@ -1,7 +1,8 @@
 # mist-api Deployment + Service.
-# Image is a placeholder until the container build lands (Phase 5);
-# for local dev, run `cargo run -p mist-api` with DATABASE_URL pointed at
-# a port-forwarded StatefulSet (see deploy/README.md).
+# The :dev image is built and kind-loaded by .github/workflows/e2e-kind.yml;
+# point at a published tag for real clusters. For local dev, run
+# `cargo run -p mist-api` with DATABASE_URL pointed at a port-forwarded
+# StatefulSet (see deploy/README.md).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

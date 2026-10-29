@@ -158,7 +158,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Dashboard is CSR-only**: login/flows/alerts views ship, but there is
   no SSR, no pagination, and no in-browser click-through test yet.
 - **eBPF sensor is Linux-only** and needs BTF ≥5.15 + `clsact`; the kind
-  e2e stays experimental until images are published.
+  e2e builds its own images and asserts rollout, not sensor attach.
 
 ## License
 

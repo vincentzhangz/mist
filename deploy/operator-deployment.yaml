@@ -1,6 +1,7 @@
 # mist-operator Deployment + Service (the Service fronts the alert webhook
-# that mist-api calls). Image is a placeholder until the container build
-# lands (Phase 5); for local dev, run `cargo run -p mist-operator`.
+# that mist-api calls). The :dev image is built and kind-loaded by
+# .github/workflows/e2e-kind.yml; point at a published tag for real
+# clusters. For local dev, run `cargo run -p mist-operator`.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

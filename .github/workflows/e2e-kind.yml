@@ -1,25 +1,68 @@
 name: e2e-kind
 
-# EXPERIMENTAL / BEST-EFFORT: the e2e loop needs a Linux runner with
-# kernel BTF for the eBPF sensor, and several images are still :dev
-# placeholders (see README production-gaps). This workflow proves the
-# install path and the operator's DaemonSet rendering; sensor traffic
-# assertions land with Phase 4. Failures here do not gate merges.
+# End-to-end smoke: builds all images from Dockerfiles, loads them into a
+# fresh kind cluster, applies deploy/, and asserts the operator/API roll out
+# and the operator renders the agent DaemonSet. Runs weekly plus on demand;
+# not on every push (the release-mode container builds take several minutes).
+#
+# Known limits: the sensor's TC attach is NOT asserted (needs BTF on the
+# runner kernel); the agent DaemonSet is checked for existence only.
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 0" # weekly, Sundays 06:00 UTC
 
+env:
+  # Hermetic toolchain install so parallel checkouts never share state.
+  RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
+  CARGO_HOME: ${{ github.workspace }}/.cargo-home
+
 jobs:
   kind-smoke:
+    name: kind smoke (build, load, install, assert)
     runs-on: ubuntu-latest
-    continue-on-error: true # experimental: report, don't gate
     steps:
       - uses: actions/checkout@v4
+      - name: Install nightly toolchain with rust-src
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          rustup --version >/dev/null 2>&1 || \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          rustup toolchain install nightly --component rust-src
+      - name: Install prebuilt bpf-linker
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          # Pinned to the release this repo was verified against.
+          BPF_LINKER_VERSION=0.12.0
+          command -v zstd >/dev/null || sudo apt-get install -y zstd
+          mkdir -p "$CARGO_HOME/bin" /tmp/bpf-linker
+          curl -sSfL -o /tmp/bpf-linker/pkg.tar.zst \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          tar -I zstd -xf /tmp/bpf-linker/pkg.tar.zst -C /tmp/bpf-linker
+          install -m755 "$(find /tmp/bpf-linker -name bpf-linker -type f | head -1)" "$CARGO_HOME/bin/bpf-linker"
+          bpf-linker --version
+      - name: Build eBPF object
+        working-directory: crates/mist-ebpf
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          # Target + linker come from crates/mist-ebpf/.cargo/config.toml.
+          # The linker emits `mist-ebpf` (no extension); the agent Dockerfile
+          # expects it as mist-ebpf.o at the build context root.
+          cargo +nightly build -Z build-std=core --release
+          cp target/bpfel-unknown-none/release/mist-ebpf ../../mist-ebpf.o
+      - name: Build container images
+        run: |
+          # Tags must match deploy/*.yaml and the sample agentImage (:dev),
+          # with imagePullPolicy IfNotPresent so kind-loaded images are used.
+          docker build -t mist-api:dev -f docker/api.Dockerfile .
+          docker build -t mist-operator:dev -f docker/operator.Dockerfile .
+          docker build -t mist-agent:dev -f docker/agent.Dockerfile --build-arg EBPF_OBJECT=mist-ebpf.o .
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
           cluster_name: mist
+      - name: Load images into kind
+        run: kind load docker-image mist-api:dev mist-operator:dev mist-agent:dev --name mist
       - name: Apply manifests in install order
         run: |
           kubectl apply -f deploy/agent-rbac.yaml -f deploy/operator-rbac.yaml
@@ -32,8 +75,13 @@ jobs:
           kubectl wait --for=condition=Established crd/trafficmonitors.mist.io --timeout=60s
           kubectl wait --for=condition=Established crd/anomalyalerts.mist.io --timeout=60s
           kubectl get crd trafficmonitors.mist.io anomalyalerts.mist.io
-      - name: Assert operator and API roll out
+      - name: Assert Postgres, operator, and API roll out
         run: |
+          kubectl -n mist rollout status statefulset/mist-postgres --timeout=180s
           kubectl -n mist rollout status deployment/mist-operator --timeout=180s
           kubectl -n mist rollout status deployment/mist-api --timeout=180s
           kubectl -n mist get trafficmonitor default
+      - name: Assert operator renders the agent DaemonSet
+        run: |
+          # Existence only: the sensor's TC attach needs BTF on the node.
+          timeout 180 bash -c 'until kubectl -n mist get daemonset mist-agent >/dev/null 2>&1; do sleep 5; done'

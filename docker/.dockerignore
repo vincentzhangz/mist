@@ -2,9 +2,14 @@
 target/
 **/target/
 
+# Trunk build output (rebuilt by CI; never baked into images).
+crates/mist-dashboard/dist/
+
 # eBPF build scratch (the .o is COPYed explicitly by name, never whole dirs).
 *.o
 *.d
+# ...but the agent image bakes the prebuilt object (see docker/agent.Dockerfile).
+!mist-ebpf.o
 
 # Cargo lockfiles for scratch/vendor work (workspace Cargo.lock is committed).
 .cargo/

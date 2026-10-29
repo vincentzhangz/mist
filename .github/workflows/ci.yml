@@ -20,7 +20,7 @@ jobs:
           export PATH="$CARGO_HOME/bin:$PATH"
           rustup --version >/dev/null 2>&1 || \
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          rustup toolchain install stable --component clippy
+          rustup toolchain install stable --component rustfmt,clippy
           rustup default stable
       - name: Build workspace
         run: |
@@ -34,6 +34,11 @@ jobs:
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
           cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check formatting
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo fmt --all -- --check
+          (cd crates/mist-ebpf && cargo fmt -- --check)
 
   ebpf:
     name: eBPF cross-compile (nightly + bpf-linker)
@@ -49,7 +54,16 @@ jobs:
       - name: Install prebuilt bpf-linker
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
-          cargo +nightly install bpf-linker
+          # Pinned to the release this repo was verified against; building
+          # bpf-linker from source needs LLVM dev libraries and takes ~10min.
+          BPF_LINKER_VERSION=0.12.0
+          command -v zstd >/dev/null || sudo apt-get install -y zstd
+          mkdir -p "$CARGO_HOME/bin" /tmp/bpf-linker
+          curl -sSfL -o /tmp/bpf-linker/pkg.tar.zst \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          tar -I zstd -xf /tmp/bpf-linker/pkg.tar.zst -C /tmp/bpf-linker
+          install -m755 "$(find /tmp/bpf-linker -name bpf-linker -type f | head -1)" "$CARGO_HOME/bin/bpf-linker"
+          bpf-linker --version
       - name: Build mist-ebpf for bpfel-unknown-none
         working-directory: crates/mist-ebpf
         run: |
@@ -70,10 +84,8 @@ jobs:
           rustup --version >/dev/null 2>&1 || \
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           rustup target add wasm32-unknown-unknown
-          cargo install trunk --locked
+          cargo install trunk --version 0.22.1 --locked
       - name: Build dashboard bundle
-        # NOTE: red until the dashboard owner lands Trunk.toml + index.html
-        # (Phase 4; crates/ is owned by another workstream — see README roadmap).
         working-directory: crates/mist-dashboard
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
@@ -97,8 +109,9 @@ jobs:
           --set postgres.enabled=false
           --set api.databaseUrl=postgres://mist:secret@db.internal:5432/mist
           > /tmp/mist-external-db.yaml
-      - name: Dry-run install against a cluster-less kubeconform check
+      - name: Validate rendered manifests parse as YAML
         # Fails the job if any rendered document is not valid Kubernetes YAML.
         run: |
+          python3 -c "import yaml" 2>/dev/null || pip install --break-system-packages pyyaml
           helm template mist helm/mist --namespace mist --include-crds > /tmp/mist-all.yaml
           python3 -c "import yaml,sys; list(yaml.safe_load_all(open('/tmp/mist-all.yaml'))); print('all documents parse')"

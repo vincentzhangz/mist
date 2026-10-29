@@ -59,7 +59,7 @@ operator:
 
 postgres:
   enabled: true
-  image: postgres:17-alpine
+  image: postgres:18-alpine
   auth:
     username: mist
     # Dev-only default. Override with --set for any shared environment.

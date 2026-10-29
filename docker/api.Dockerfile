@@ -7,9 +7,9 @@ ARG RUST_VERSION=1.85
 FROM rust:${RUST_VERSION}-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY crates/mist-api ./crates/mist-api
-COPY crates/mist-types ./crates/mist-types
-COPY crates/mist-flow ./crates/mist-flow
+# The whole crates/ tree: cargo fails when workspace members listed in the
+# root Cargo.toml are absent, even for `cargo build -p mist-api`.
+COPY crates/ ./crates/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p mist-api && \
