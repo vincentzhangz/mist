@@ -331,9 +331,7 @@ mod linux {
             args.iface.clone()
         };
         anyhow::ensure!(!ifaces.is_empty(), "no network interfaces to attach to");
-        for iface in &ifaces {
-            attach_interface(&mut bpf, iface)?;
-        }
+        attach_interfaces(&mut bpf, &ifaces)?;
 
         // `take_map` moves each map out of `bpf`, so the two handles are owned
         // instead of borrowing `bpf` across each other (two `map_mut` borrows
@@ -445,10 +443,17 @@ mod linux {
         convert::select_interfaces(&entries)
     }
 
-    fn attach_interface(bpf: &mut Ebpf, iface: &str) -> anyhow::Result<()> {
-        let iface_c = CString::new(iface).context("interface name contains NUL")?;
-        if let Err(error) = tc::qdisc_add_clsact(iface_c.as_c_str()) {
-            tracing::debug!(?error, iface, "clsact qdisc already present or unsupported");
+    /// Attach both classifiers to every interface: each program is loaded once
+    /// and then attached per interface (re-loading an attached program fails,
+    /// and each `program_mut` borrow must end before the next begins).
+    fn attach_interfaces(bpf: &mut Ebpf, ifaces: &[String]) -> anyhow::Result<()> {
+        let mut names = Vec::with_capacity(ifaces.len());
+        for iface in ifaces {
+            let iface_c = CString::new(iface.as_str()).context("interface name contains NUL")?;
+            if let Err(error) = tc::qdisc_add_clsact(iface_c.as_c_str()) {
+                tracing::debug!(?error, iface, "clsact qdisc already present or unsupported");
+            }
+            names.push(iface_c);
         }
         for (prog_name, attach_type) in [
             ("mist_ingress", TcAttachType::Ingress),
@@ -462,11 +467,15 @@ mod linux {
             program
                 .load()
                 .with_context(|| format!("loading {prog_name}"))?;
-            program
-                .attach(iface_c.as_c_str(), attach_type)
-                .with_context(|| format!("attaching {prog_name} to {iface}"))?;
+            for iface_c in &names {
+                program
+                    .attach(iface_c.as_c_str(), attach_type)
+                    .with_context(|| {
+                        format!("attaching {prog_name} to {}", iface_c.to_string_lossy())
+                    })?;
+            }
+            tracing::info!(prog = prog_name, ifaces = ?ifaces, "attached classifier");
         }
-        tracing::info!(iface, "attached ingress+egress classifiers");
         Ok(())
     }
 }

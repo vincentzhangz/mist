@@ -13,10 +13,11 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_PIPE,
-    helpers::bpf_ktime_get_ns,
+    helpers::{bpf_ktime_get_ns, bpf_skb_load_bytes},
     macros::{classifier, map},
     maps::{PerCpuArray, PerCpuHashMap},
     programs::TcContext,
+    EbpfContext,
 };
 use mist_flow::{parse_ipv4_flow, Direction, FlowKeyWire, FlowStatsWire};
 
@@ -61,8 +62,19 @@ fn track(ctx: &TcContext, direction: Direction) -> i32 {
 
 fn try_track(ctx: &TcContext, direction: Direction) -> Result<(), ()> {
     let mut buf = [0u8; LOAD_LEN];
-    let loaded = ctx.load_bytes(0, &mut buf).map_err(|_| ())?;
-    let packet = buf.get(..loaded).ok_or(())?;
+    let want = (ctx.len() as usize).min(LOAD_LEN);
+    // Zero-length reads are rejected by strict verifiers, so refuse them
+    // before the helper call; aya's `load_bytes` wrapper lacks this guard.
+    if want == 0 {
+        return Err(());
+    }
+    // SAFETY: direct `bpf_skb_load_bytes` call: `buf` is a valid `want`-byte
+    // stack destination, `want` is nonzero and within the packet.
+    let ret = unsafe { bpf_skb_load_bytes(ctx.as_ptr(), 0, buf.as_mut_ptr().cast(), want as u32) };
+    if ret != 0 {
+        return Err(());
+    }
+    let packet = buf.get(..want).ok_or(())?;
     let parsed = parse_ipv4_flow(packet, direction).ok_or(())?;
     // SAFETY: `bpf_ktime_get_ns` takes no arguments and always succeeds.
     let now = unsafe { bpf_ktime_get_ns() };
