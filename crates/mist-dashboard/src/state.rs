@@ -72,6 +72,15 @@ impl AppState {
         self.alerts.set(Vec::new());
     }
 
+    /// Drop the session when the server reports it unauthorized, so the
+    /// route guard bounces to `/login` instead of stranding the user on
+    /// views that can never load again (e.g. an expired overnight token).
+    pub fn logout_if_unauthorized(&self, err: &crate::api::ApiError) {
+        if err.is_unauthorized() {
+            self.logout();
+        }
+    }
+
     /// Clear the session (logout).
     pub fn logout(&self) {
         clear_session();

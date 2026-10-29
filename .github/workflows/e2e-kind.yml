@@ -50,6 +50,17 @@ jobs:
           # expects it as mist-ebpf.o at the build context root.
           cargo +nightly build -Z build-std=core --release
           cp target/bpfel-unknown-none/release/mist-ebpf ../../mist-ebpf.o
+      - name: Build dashboard bundle
+        working-directory: crates/mist-dashboard
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          # The api Dockerfile COPYs dist/ into the image; same pinned
+          # toolchain + trunk as the ci.yml dashboard job.
+          rustup toolchain install 1.99.1
+          rustup default 1.99.1
+          rustup target add wasm32-unknown-unknown
+          cargo install trunk --version 0.22.1 --locked
+          trunk build --release
       - name: Build container images
         run: |
           # Tags must match deploy/*.yaml and the sample agentImage (:dev),
@@ -99,6 +110,12 @@ jobs:
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:3100/healthz >/dev/null && break
             sleep 2
+          done
+          # SPA shell at / and the client route /login, both referencing the
+          # hashed trunk bundle; unknown /api/* paths stay JSON 404s.
+          curl -sf http://127.0.0.1:3100/ | grep -q 'mist-dashboard-.*\.js'
+          curl -sf http://127.0.0.1:3100/login | grep -q 'mist-dashboard-.*\.js'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/api/nope)" = "404"
           # Prometheus scrape is public and carries counters + storage gauges.
           curl -sf -D - http://127.0.0.1:3100/metrics -o /tmp/metrics.txt | grep -qi 'text/plain; version=0.0.4'
           grep -q 'mist_api_ingest_batches_accepted_total' /tmp/metrics.txt

@@ -33,6 +33,7 @@ pub fn AlertsView() -> impl IntoView {
     let detail_loading = RwSignal::new(false);
     let action_error = RwSignal::new(Option::<String>::None);
     let list_error = RwSignal::new(Option::<String>::None);
+    let list_loaded = RwSignal::new(false);
     let resolving = RwSignal::new(false);
 
     // Refetch the list whenever the token or a filter changes.
@@ -44,6 +45,7 @@ pub fn AlertsView() -> impl IntoView {
             return;
         };
         let alerts_signal = state.alerts;
+        let session = state;
         leptos::task::spawn_local(async move {
             let sev = (severity != "all").then_some(severity.as_str());
             let st = (alert_state != "all").then_some(alert_state.as_str());
@@ -53,9 +55,11 @@ pub fn AlertsView() -> impl IntoView {
                     list_error.set(None);
                 }
                 Err(err) => {
+                    session.logout_if_unauthorized(&err);
                     list_error.set(Some(err.to_string()));
                 }
             }
+            list_loaded.set(true);
         });
     });
 
@@ -69,6 +73,7 @@ pub fn AlertsView() -> impl IntoView {
         };
         detail_loading.set(true);
         detail.set(None);
+        let session = state;
         leptos::task::spawn_local(async move {
             match fetch_alert(&token, &id).await {
                 Ok(alert) => {
@@ -76,6 +81,7 @@ pub fn AlertsView() -> impl IntoView {
                     action_error.set(None);
                 }
                 Err(err) => {
+                    session.logout_if_unauthorized(&err);
                     action_error.set(Some(err.to_string()));
                 }
             }
@@ -88,18 +94,27 @@ pub fn AlertsView() -> impl IntoView {
             <h2>"Alerts"</h2>
             <AlertFilters severity_filter=severity_filter state_filter=state_filter />
             <Show when=move || list_error.get().is_some()>
-                <p class="error">{move || list_error.get().unwrap_or_default()}</p>
+                <p class="error" aria-live="polite">
+                    {move || list_error.get().unwrap_or_default()}
+                </p>
             </Show>
             <div class="alerts-layout">
-                <ul class="alert-list">
-                    <For
-                        each=move || state.alerts.get()
-                        key=|alert| alert.id.clone()
-                        let(alert)
-                    >
-                        <AlertListItem alert=alert selected=selected />
-                    </For>
-                </ul>
+                <Show
+                    when=move || !state.alerts.get().is_empty() || !list_loaded.get()
+                    fallback=|| {
+                        view! { <p class="muted">"No alerts match these filters."</p> }
+                    }
+                >
+                    <ul class="alert-list">
+                        <For
+                            each=move || state.alerts.get()
+                            key=|alert| alert.id.clone()
+                            let(alert)
+                        >
+                            <AlertListItem alert=alert selected=selected />
+                        </For>
+                    </ul>
+                </Show>
                 <div class="alert-detail">
                     <AlertDetail
                         detail=detail
@@ -281,7 +296,9 @@ fn AlertBody(
                 <tbody>{label_rows}</tbody>
             </table>
             <Show when=move || error.get().is_some()>
-                <p class="error">{move || error.get().unwrap_or_default()}</p>
+                <p class="error" aria-live="polite">
+                    {move || error.get().unwrap_or_default()}
+                </p>
             </Show>
             <Show when=move || is_firing>
                 <button
@@ -298,6 +315,7 @@ fn AlertBody(
                         resolving.set(true);
                         error.set(None);
                         let alerts = state.alerts;
+                        let session = state;
                         leptos::task::spawn_local(async move {
                             match resolve_alert(&token, &current.id).await {
                                 Ok(updated) => {
@@ -312,6 +330,7 @@ fn AlertBody(
                                     });
                                 }
                                 Err(err) => {
+                                    session.logout_if_unauthorized(&err);
                                     error.set(Some(err.to_string()));
                                 }
                             }

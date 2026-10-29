@@ -1,6 +1,7 @@
 /* mist dashboard: hand-written stylesheet (no frameworks). */
 
 :root {
+  color-scheme: dark;
   --bg: #0f1419;
   --panel: #182028;
   --panel-2: #1f2933;
@@ -39,6 +40,7 @@ body {
 
 .login-page {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -85,6 +87,15 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 8px 10px;
+  /* 16px keeps iOS Safari from zooming on focus; fine pointers keep 14px. */
+  font-size: 16px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  input,
+  select {
+    font-size: 14px;
+  }
 }
 
 button {
@@ -104,6 +115,7 @@ button:disabled {
 
 .app {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -252,6 +264,16 @@ th.num {
   gap: 16px;
 }
 
+@media (max-width: 720px) {
+  .alerts-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
 .alert-list {
   list-style: none;
   margin: 0;
@@ -296,17 +318,17 @@ th.num {
 }
 
 .sev-info {
-  background: #1c3d5a;
+  background: #142c44;
   color: var(--info);
 }
 
 .sev-warning {
-  background: #4a3800;
+  background: #3a2c00;
   color: var(--warn);
 }
 
 .sev-critical {
-  background: #5a1f1f;
+  background: #3d1010;
   color: var(--danger);
 }
 

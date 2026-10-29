@@ -1,6 +1,7 @@
 # mist-api: Axum flow/alert API + analyzer (stateless; needs Postgres).
-# Validated by review only — no container daemon is available in this
-# environment, so this Dockerfile has not been built.
+# Serves the trunk-built dashboard SPA from /srv/dashboard; build the bundle
+# first (`trunk build --release` in crates/mist-dashboard) — the COPY below
+# fails on a fresh checkout without it.
 
 ARG RUST_VERSION=1.99
 
@@ -20,6 +21,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/mist-api /usr/local/bin/mist-api
+# Dashboard SPA bundle baked in; the API serves SERVE_DIR at / with
+# index.html fallback (API-only mode when the dir is absent).
+COPY crates/mist-dashboard/dist/ /srv/dashboard/
+ENV SERVE_DIR=/srv/dashboard
 # Must match BIND_ADDR / containerPort in deploy/api-deployment.yaml.
 EXPOSE 3000
 ENV BIND_ADDR=0.0.0.0:3000

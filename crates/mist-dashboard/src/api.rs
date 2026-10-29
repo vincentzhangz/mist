@@ -30,6 +30,14 @@ impl Display for ApiError {
     }
 }
 
+impl ApiError {
+    /// Whether the server rejected the session (expired/revoked token).
+    #[must_use]
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::Status(401, _))
+    }
+}
+
 fn auth_value(token: &str) -> String {
     format!("Bearer {token}")
 }
@@ -323,5 +331,13 @@ mod tests {
     #[test]
     fn ws_url_none_off_wasm() {
         assert_eq!(ws_url("token"), None);
+    }
+
+    #[test]
+    fn unauthorized_matches_401_only() {
+        assert!(ApiError::Status(401, "unauthorized".to_owned()).is_unauthorized());
+        assert!(!ApiError::Status(403, "forbidden".to_owned()).is_unauthorized());
+        assert!(!ApiError::Network("down".to_owned()).is_unauthorized());
+        assert!(!ApiError::Decode("bad".to_owned()).is_unauthorized());
     }
 }

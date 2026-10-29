@@ -19,7 +19,7 @@ pub fn LoginView() -> impl IntoView {
 
     view! {
         <Show
-            when=move || state.token.get().is_some()
+            when=move || state.token.get().is_none()
             fallback=|| {
                 view! { <Redirect path="/" /> }
             }
@@ -84,7 +84,9 @@ pub fn LoginView() -> impl IntoView {
                         />
                     </label>
                     <Show when=move || error.get().is_some()>
-                        <p class="error">{move || error.get().unwrap_or_default()}</p>
+                        <p class="error" aria-live="polite">
+                            {move || error.get().unwrap_or_default()}
+                        </p>
                     </Show>
                     <button type="submit" disabled=move || busy.get()>
                         {move || if busy.get() { "Signing in…" } else { "Sign in" }}
