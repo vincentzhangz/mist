@@ -229,8 +229,16 @@ mod linux {
 
     // SAFETY: transparent wrappers over `repr(C)` integer-only structs: every
     // bit pattern is a valid value, and both are `Copy`.
+    #[allow(
+        unsafe_code,
+        reason = "aya requires Pod marker impls for map keys/values"
+    )]
     unsafe impl aya::Pod for Key {}
     // SAFETY: see above.
+    #[allow(
+        unsafe_code,
+        reason = "aya requires Pod marker impls for map keys/values"
+    )]
     unsafe impl aya::Pod for Stats {}
 
     /// Pod-IP attribution cache. Works without a cluster (empty cache) so the
@@ -287,7 +295,7 @@ mod linux {
                         let mut ips = Vec::new();
                         ips.extend(status.pod_ip.clone());
                         if let Some(pod_ips) = &status.pod_ips {
-                            ips.extend(pod_ips.iter().filter_map(|entry| entry.ip.clone()));
+                            ips.extend(pod_ips.iter().map(|entry| entry.ip.clone()));
                         }
                         for ip in ips {
                             if let Ok(addr) = ip.parse::<IpAddr>() {
@@ -327,11 +335,14 @@ mod linux {
             attach_interface(&mut bpf, iface)?;
         }
 
+        // `take_map` moves each map out of `bpf`, so the two handles are owned
+        // instead of borrowing `bpf` across each other (two `map_mut` borrows
+        // won't compile).
         let mut flows = PerCpuHashMap::<_, Key, Stats>::try_from(
-            bpf.map_mut("FLOWS").context("finding FLOWS map")?,
+            bpf.take_map("FLOWS").context("finding FLOWS map")?,
         )?;
         let stats_map =
-            PerCpuArray::<_, u64>::try_from(bpf.map_mut("STATS").context("finding STATS map")?)?;
+            PerCpuArray::<_, u64>::try_from(bpf.take_map("STATS").context("finding STATS map")?)?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -355,10 +366,10 @@ mod linux {
                 %node,
                 "drained flows"
             );
-            if !batch.flows.is_empty() {
-                if let Err(error) = http.post(&ingest_url).json(&batch).send().await {
-                    tracing::warn!(?error, url = %ingest_url, "ingest shipment failed");
-                }
+            if !batch.flows.is_empty()
+                && let Err(error) = http.post(&ingest_url).json(&batch).send().await
+            {
+                tracing::warn!(?error, url = %ingest_url, "ingest shipment failed");
             }
         }
     }

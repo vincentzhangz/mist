@@ -179,7 +179,7 @@ pub fn process_batch(
         }
     }
     state.batches = state.batches.saturating_add(1);
-    if state.batches % 12 == 0 {
+    if state.batches.is_multiple_of(12) {
         let horizon = batch
             .flows
             .iter()
@@ -543,10 +543,10 @@ pub async fn run_analyzer(
                     let _ = alerts_tx.send(AlertEvent::Alert {
                         alert: view.clone(),
                     });
-                    if let Some(url) = &webhook_url {
-                        if let Err(error) = http.post(url).json(&alert).send().await {
-                            tracing::warn!(?error, url = %url, "operator webhook call failed");
-                        }
+                    if let Some(url) = &webhook_url
+                        && let Err(error) = http.post(url).json(&alert).send().await
+                    {
+                        tracing::warn!(?error, url = %url, "operator webhook call failed");
                     }
                     tracing::info!(id = %view.alert.id, severity = ?view.alert.severity, "alert upserted");
                 }

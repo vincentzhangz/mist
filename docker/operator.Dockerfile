@@ -2,7 +2,7 @@
 # Validated by review only — no container daemon is available in this
 # environment, so this Dockerfile has not been built.
 
-ARG RUST_VERSION=1.85
+ARG RUST_VERSION=1.99
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 WORKDIR /src
