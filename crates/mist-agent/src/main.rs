@@ -22,6 +22,11 @@ struct Args {
     /// Base URL of the mist-api server.
     #[arg(long, default_value = "http://localhost:3000")]
     api_url: String,
+    /// Bearer token for `POST /api/ingest`. Also read from `MIST_API_TOKEN`
+    /// (the operator injects it from a Secret when the monitor names one);
+    /// empty sends no header, for APIs without `INGEST_TOKEN` provisioned.
+    #[arg(long, env = "MIST_API_TOKEN", default_value = "")]
+    api_token: String,
     /// Drain interval in seconds.
     #[arg(long, default_value_t = 5)]
     interval_secs: u64,
@@ -367,10 +372,22 @@ mod linux {
                 %node,
                 "drained flows"
             );
-            if !batch.flows.is_empty()
-                && let Err(error) = http.post(&ingest_url).json(&batch).send().await
-            {
-                tracing::warn!(?error, url = %ingest_url, "ingest shipment failed");
+            if !batch.flows.is_empty() {
+                let mut request = http.post(&ingest_url);
+                if !args.api_token.is_empty() {
+                    request = request.bearer_auth(&args.api_token);
+                }
+                match request.json(&batch).send().await {
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) => tracing::warn!(
+                        status = %response.status(),
+                        url = %ingest_url,
+                        "ingest shipment rejected"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(?error, url = %ingest_url, "ingest shipment failed");
+                    }
+                }
             }
         }
     }

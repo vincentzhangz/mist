@@ -50,6 +50,34 @@ spec:
               value: postgres://$(PGUSER):$(PGPASSWORD)@mist-postgres.mist.svc.cluster.local:5432/mist
             - name: OPERATOR_WEBHOOK_URL
               value: http://mist-operator.mist.svc.cluster.local:8081/alerts
+            # Auth Secret (deploy/api-auth-secret.example). jwt-secret is
+            # required — the pod blocks until the Secret exists, and the API
+            # refuses to start without it. The rest are optional keys:
+            # absent admin-* fails login closed; absent ingest-token leaves
+            # /api/ingest open (dev only).
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: jwt-secret
+            - name: ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: admin-email
+                  optional: true
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: admin-password
+                  optional: true
+            - name: INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: ingest-token
+                  optional: true
             - name: BIND_ADDR
               value: 0.0.0.0:3000
             - name: RUST_LOG

@@ -55,6 +55,12 @@ pub struct TrafficMonitorSpec {
     /// eBPF object path inside the agent image.
     #[serde(default = "default_object_path")]
     pub object_path: String,
+    /// Name of a Secret holding the agent ingest token (key
+    /// `ingest-token`, same Secret/key the API reads `INGEST_TOKEN` from).
+    /// When set, the agent container gets `MIST_API_TOKEN` from it and
+    /// authenticates `POST /api/ingest`; when unset, agents send no token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token_secret_name: Option<String>,
 }
 
 impl Default for TrafficMonitorSpec {
@@ -66,6 +72,7 @@ impl Default for TrafficMonitorSpec {
             node_selector: BTreeMap::new(),
             api_url: default_api_url(),
             object_path: default_object_path(),
+            api_token_secret_name: None,
         }
     }
 }

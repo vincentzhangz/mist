@@ -21,15 +21,22 @@ mist is installed in namespace {{ .Values.namespace }}.
 
      kubectl -n {{ .Values.namespace }} port-forward svc/mist-api 3000:3000
      curl localhost:3000/healthz            # -> ok
-     curl localhost:3000/api/flows | head -c 500
-     curl localhost:3000/api/alerts
+     curl localhost:3000/metrics | head -20 # public Prometheus scrape
 
-   No login is required: the API currently has no authentication
-   (see the chart README/docs). Do not expose it beyond localhost.
+   REST needs a login token (seeded from api.adminEmail/adminPassword;
+   empty values fail login closed — see values.yaml):
 
-4. Watch live events over the WebSocket:
+     TOKEN=$(curl -s -X POST localhost:3000/api/auth/login \
+       -H 'content-type: application/json' \
+       -d '{"email":"...","password":"..."}' | \
+       python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+     curl -H "authorization: Bearer $TOKEN" localhost:3000/api/alerts
 
-     # any WS client against ws://localhost:3000/api/ws (see step 3 forward)
+   Dashboard: http://localhost:3000/login with the same credentials.
+
+4. Watch live events over the WebSocket (token in ?token=):
+
+     # any WS client against "ws://localhost:3000/api/ws?token=$TOKEN"
 
 {{- if .Values.agent.enabled }}
 

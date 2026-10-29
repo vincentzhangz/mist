@@ -6,3 +6,6 @@ crates/mist-dashboard/dist/
 
 # Compiled eBPF objects (built locally, baked into the agent image at build time).
 *.o
+
+# Local API auth Secret (real credentials; the .example is the template).
+deploy/api-auth-secret.yaml

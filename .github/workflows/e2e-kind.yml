@@ -70,6 +70,16 @@ jobs:
           kubectl apply -f deploy/postgres.yaml
           kubectl apply -f deploy/api-deployment.yaml -f deploy/operator-deployment.yaml
           kubectl apply -f deploy/samples/
+      - name: Create API auth Secret
+        run: |
+          # The API pod blocks until this Secret exists (JWT_SECRET is a
+          # required secretKeyRef) and refuses to start without it. Values
+          # are e2e-only; see deploy/api-auth-secret.example for the shape.
+          kubectl -n mist create secret generic mist-api-auth \
+            --from-literal=jwt-secret=e2e-test-secret-not-for-production \
+            --from-literal=admin-email=admin@example.com \
+            --from-literal=admin-password='s3cret-for-kind' \
+            --from-literal=ingest-token=e2e-ingest-token
       - name: Assert CRDs exist
         run: |
           kubectl wait --for=condition=Established crd/trafficmonitors.mist.io --timeout=60s
@@ -81,6 +91,29 @@ jobs:
           kubectl -n mist rollout status deployment/mist-operator --timeout=180s
           kubectl -n mist rollout status deployment/mist-api --timeout=180s
           kubectl -n mist get trafficmonitor default
+      - name: Assert API serves the dashboard SPA
+        run: |
+          kubectl -n mist port-forward svc/mist-api 3100:3000 >/tmp/pf.log 2>&1 &
+          PF_PID=$!
+          trap 'kill $PF_PID 2>/dev/null' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:3100/healthz >/dev/null && break
+            sleep 2
+          # Prometheus scrape is public and carries counters + storage gauges.
+          curl -sf -D - http://127.0.0.1:3100/metrics -o /tmp/metrics.txt | grep -qi 'text/plain; version=0.0.4'
+          grep -q 'mist_api_ingest_batches_accepted_total' /tmp/metrics.txt
+          grep -q 'mist_api_flows_stored' /tmp/metrics.txt
+          # Ingest requires the provisioned token; login issues JWTs for REST.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3100/api/ingest \
+            -H 'content-type: application/json' -d '{"node":"probe","flows":[]}')" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3100/api/ingest \
+            -H 'content-type: application/json' -H 'authorization: Bearer e2e-ingest-token' \
+            -d '{"node":"probe","flows":[]}')" = "202"
+          TOKEN=$(curl -sf -X POST http://127.0.0.1:3100/api/auth/login \
+            -H 'content-type: application/json' \
+            -d '{"email":"admin@example.com","password":"s3cret-for-kind"}' | \
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          curl -sf -H "authorization: Bearer $TOKEN" http://127.0.0.1:3100/api/flows >/dev/null
       - name: Assert operator renders the agent DaemonSet
         run: |
           # Existence only: the sensor's TC attach needs BTF on the node.

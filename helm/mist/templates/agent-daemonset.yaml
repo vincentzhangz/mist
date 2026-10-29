@@ -48,6 +48,13 @@ spec:
               value: info
             - name: MIST_WATCHED_NAMESPACES
               value: ""
+            {{- if .Values.agent.apiTokenSecretName }}
+            - name: MIST_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agent.apiTokenSecretName | quote }}
+                  key: ingest-token
+            {{- end }}
           args:
             - --object={{ .Values.agent.objectPath }}
             - --api-url={{ .Values.agent.apiUrl }}

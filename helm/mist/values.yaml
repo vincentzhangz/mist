@@ -20,6 +20,9 @@ agent:
   apiUrl: http://mist-api.mist.svc.cluster.local:3000
   intervalSecs: 5
   objectPath: /etc/mist/mist-ebpf.o
+  # Secret holding the ingest token (key `ingest-token`), e.g. the
+  # mist-api-auth Secret below. Empty sends no token (dev only).
+  apiTokenSecretName: ""
   nodeSelector: {}
   tolerations:
     - operator: Exists
@@ -38,6 +41,15 @@ api:
   # Postgres URL for persistence; the bundled Postgres fills this in.
   databaseUrl: ""
   operatorWebhookUrl: http://mist-operator.mist.svc.cluster.local:8081/alerts
+  # Auth Secret (templates/secrets.yaml). jwtSecret MUST be overridden with
+  # --set for any shared environment (the chart default is dev-only);
+  # adminEmail/adminPassword seed the dashboard login (empty: login fails
+  # closed); ingestToken, when non-empty, is required as the Bearer token
+  # on POST /api/ingest (empty: ingest stays open, dev only).
+  jwtSecret: "dev-only-change-me"
+  adminEmail: ""
+  adminPassword: ""
+  ingestToken: ""
   resources:
     requests:
       cpu: 50m

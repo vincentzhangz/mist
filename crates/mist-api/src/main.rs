@@ -11,11 +11,14 @@
 //! is set.
 //!
 //! Dashboard access uses email+password login (`POST /api/auth/login`)
-//! issuing HS256 JWTs; every `/api/*` route except the login, the agent
-//! ingest, and the WS handshake (which takes `?token=`) requires one.
+//! issuing HS256 JWTs; every `/api/*` route except the login and the WS
+//! handshake (which takes `?token=`) requires one. Agent ingest requires
+//! the provisioned `INGEST_TOKEN` as `Bearer` when configured, and stays
+//! open otherwise. `JWT_SECRET` is required at startup (fail closed).
 
 mod analyzer;
 mod auth;
+mod metrics;
 mod store;
 
 use std::{net::SocketAddr, sync::Arc};
@@ -51,6 +54,9 @@ struct AppStateInner {
     ingest_tx: mpsc::Sender<FlowBatch>,
     events_tx: broadcast::Sender<AlertEvent>,
     jwt_secret: String,
+    /// Required `Bearer` token for `/api/ingest`; `None` leaves ingest open.
+    ingest_token: Option<String>,
+    metrics: std::sync::Arc<metrics::Metrics>,
     /// Dashboard SPA file service; `None` runs API-only.
     spa: Option<ServeDir<ServeFile>>,
 }
@@ -165,11 +171,28 @@ async fn ingest(
         flows = batch.flows.len(),
         "ingest received batch"
     );
+    let flows = batch.flows.len();
     state.inner.ingest_tx.try_send(batch).map_err(|_| {
         tracing::warn!("ingest channel saturated; shedding batch");
+        state.inner.metrics.batch_shed();
         AppError::Saturated
     })?;
+    state.inner.metrics.batch_accepted(flows);
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Prometheus exposition scrape. Public like `/healthz` (outside `/api/`,
+/// so [`require_auth`] lets it through) for in-cluster scraping.
+async fn metrics_handler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let counts = state.inner.store.counts().await?;
+    let body = state.inner.metrics.render(&counts);
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,12 +222,16 @@ async fn login(
                 .into_response();
         }
     };
-    // Unknown users and wrong passwords both yield 401 (no oracle).
-    let valid = match stored {
-        Some(hash) => auth::verify_password(&request.password, &hash)
+    // Unknown users and wrong passwords both yield 401 with no oracle:
+    // unknown users still pay one argon2 verification (against a dummy
+    // hash) so response timing doesn't reveal which emails exist.
+    let valid = if let Some(hash) = stored {
+        auth::verify_password(&request.password, &hash)
             .await
-            .unwrap_or(false),
-        None => false,
+            .unwrap_or(false)
+    } else {
+        let _ = auth::verify_password(&request.password, auth::DUMMY_HASH).await;
+        false
     };
     if !valid {
         return (
@@ -233,38 +260,54 @@ async fn login(
     }
 }
 
+/// Bearer token from the `Authorization` header, if syntactically present.
+fn bearer_token(req: &Request<Body>) -> Option<&str> {
+    req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
 /// Rejects unauthenticated `/api/*` requests with 401.
 ///
-/// Public without a token: `/healthz`, `POST /api/auth/login`, `/api/ingest`
-/// (agents have no tokens yet — agent auth is future work), and `/api/ws`
-/// (the token travels in `?token=` instead, checked in [`ws_handler`]).
+/// Public without a token: `/healthz`, `/metrics`, `POST /api/auth/login`,
+/// and `/api/ws` (the token travels in `?token=` instead, checked in
+/// [`ws_handler`]). `/api/ingest` requires the provisioned `INGEST_TOKEN`
+/// as `Bearer` when one is configured, and stays open otherwise.
 /// Everything else under `/api/` requires `Authorization: Bearer <jwt>`.
 async fn require_auth(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
-    let path = req.uri().path().to_owned();
-    let public = !path.starts_with("/api/")
-        || path == "/api/auth/login"
-        || path == "/api/ingest"
-        || path == "/api/ws";
-    if public {
-        return next.run(req).await;
-    }
-    let authorized = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .and_then(|token| auth::verify_token(token, &state.inner.jwt_secret))
-        .is_some();
-    if !authorized {
-        return (
+    let unauthorized = || {
+        (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),
         )
-            .into_response();
+            .into_response()
+    };
+    let path = req.uri().path().to_owned();
+    if !path.starts_with("/api/") || path == "/api/auth/login" || path == "/api/ws" {
+        return next.run(req).await;
+    }
+    if path == "/api/ingest" {
+        let open = state.inner.ingest_token.is_none();
+        let token_ok = state
+            .inner
+            .ingest_token
+            .as_deref()
+            .is_some_and(|expected| bearer_token(&req) == Some(expected));
+        if open || token_ok {
+            return next.run(req).await;
+        }
+        return unauthorized();
+    }
+    let authorized = bearer_token(&req)
+        .and_then(|token| auth::verify_token(token, &state.inner.jwt_secret))
+        .is_some();
+    if !authorized {
+        return unauthorized();
     }
     next.run(req).await
 }
@@ -368,6 +411,7 @@ async fn spa_handler(
 fn router(state: AppState) -> Router {
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_handler))
         .route("/api/auth/login", post(login))
         .route("/api/flows", get(list_flows))
         .route("/api/alerts", get(list_alerts))
@@ -382,7 +426,17 @@ fn router(state: AppState) -> Router {
         app
     };
     app.layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        // WS sessions travel in `?token=`, so spans log the path only —
+        // the default span would log the full URI (query included).
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                tracing::debug_span!(
+                    "http.request",
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                )
+            }),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -416,6 +470,13 @@ async fn seed_admin(store: &Store) {
 
 #[cfg(test)]
 fn test_state() -> (AppState, mpsc::Receiver<FlowBatch>) {
+    test_state_with_ingest_token(None)
+}
+
+#[cfg(test)]
+fn test_state_with_ingest_token(
+    ingest_token: Option<String>,
+) -> (AppState, mpsc::Receiver<FlowBatch>) {
     let (ingest_tx, ingest_rx) = mpsc::channel(16);
     let (events_tx, _) = broadcast::channel(16);
     let state = AppState {
@@ -424,6 +485,8 @@ fn test_state() -> (AppState, mpsc::Receiver<FlowBatch>) {
             ingest_tx,
             events_tx,
             jwt_secret: String::from("test-secret"),
+            ingest_token,
+            metrics: Arc::new(metrics::Metrics::default()),
             spa: None,
         }),
     };
@@ -460,7 +523,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("OPERATOR_WEBHOOK_URL unset; AnomalyAlert mirroring disabled");
     }
 
-    let jwt_secret = auth::jwt_secret();
+    let jwt_secret = auth::jwt_secret()?;
+    let ingest_token = auth::ingest_token();
     seed_admin(&store).await;
 
     let (ingest_tx, ingest_rx) = mpsc::channel(64);
@@ -468,13 +532,17 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
+    let api_metrics = Arc::new(metrics::Metrics::default());
     tokio::spawn(analyzer::run_analyzer(
-        ingest_rx,
-        store.clone(),
-        events_tx.clone(),
-        http,
-        webhook_url,
-        analyzer::DetectorConfig::default(),
+        analyzer::AnalyzerDeps {
+            rx: ingest_rx,
+            store: store.clone(),
+            alerts_tx: events_tx.clone(),
+            http,
+            webhook_url,
+            config: analyzer::DetectorConfig::default(),
+            metrics: api_metrics.clone(),
+        },
         analyzer::NoopExplainer,
     ));
 
@@ -496,6 +564,8 @@ async fn main() -> anyhow::Result<()> {
             ingest_tx,
             events_tx,
             jwt_secret,
+            ingest_token,
+            metrics: api_metrics,
             spa,
         }),
     };
@@ -553,6 +623,115 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         // The batch reaches the analyzer channel.
         assert_eq!(rx.recv().await.unwrap().node, "node-1");
+    }
+
+    #[tokio::test]
+    async fn ingest_requires_token_when_configured() {
+        let (state, _rx) = test_state_with_ingest_token(Some("s3cret".to_owned()));
+        let post = |bearer: Option<&str>| {
+            let mut request = Request::post("/api/ingest")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&batch()).unwrap()))
+                .unwrap();
+            if let Some(token) = bearer {
+                request
+                    .headers_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            router(state.clone()).oneshot(request)
+        };
+        let missing = post(None).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        let wrong = post(Some("nope")).await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let ok = post(Some("s3cret")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn metrics_exposes_counters_and_storage_gauges() {
+        let (state, _rx) = test_state();
+        // Seed two flows and one firing + one resolved alert.
+        let flow = || FlowRecord {
+            key: mist_types::FlowKey {
+                src_ip: "10.0.1.4".parse().unwrap(),
+                src_port: 51234,
+                dst_ip: "10.0.2.9".parse().unwrap(),
+                dst_port: 443,
+                protocol: 6,
+            },
+            direction: mist_types::TrafficDirection::Egress,
+            bytes: 100,
+            packets: 2,
+            start_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            node: "node-1".to_owned(),
+            src_pod: None,
+            dst_pod: None,
+        };
+        state
+            .inner
+            .store
+            .save_flows(&[flow(), flow()])
+            .await
+            .unwrap();
+        let alert = |id: &str| mist_types::Alert {
+            id: id.to_owned(),
+            severity: mist_types::Severity::Warning,
+            title: "t".to_owned(),
+            detail: "d".to_owned(),
+            first_seen_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            labels: HashMap::default(),
+            explanation: None,
+        };
+        state.inner.store.upsert_alert(&alert("a1")).await.unwrap();
+        state.inner.store.upsert_alert(&alert("a2")).await.unwrap();
+        state.inner.store.resolve_alert("a2").await.unwrap();
+
+        // One ingested batch with two flows exercises the accept counters.
+        let accepted = router(state.clone())
+            .oneshot(
+                Request::post("/api/ingest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&FlowBatch {
+                            node: "node-1".to_owned(),
+                            flows: vec![flow(), flow()],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        // /metrics is public (no token) for in-cluster scraping.
+        let response = router(state)
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        for line in [
+            "mist_api_ingest_batches_accepted_total 1",
+            "mist_api_ingest_flows_accepted_total 2",
+            "mist_api_ingest_batches_shed_total 0",
+            "mist_api_flows_stored 2",
+            "mist_api_alerts_firing 1",
+            "mist_api_alerts_resolved 1",
+            "mist_api_build_info{version=\"",
+        ] {
+            assert!(body.contains(line), "missing {line:?} in:\n{body}");
+        }
     }
 
     #[tokio::test]
@@ -670,10 +849,18 @@ mod tests {
     #[tokio::test]
     async fn legacy_argon2_hash_still_verifies() {
         // Reference hash produced by argon2 0.5.3 for "s3cret": rows written
-        // before the 0.6 upgrade must keep verifying.
-        let legacy = "$argon2id$v=19$m=19456,t=2,p=1$K0MNZoOpmNPxYNBkg9beuQ$VM/3y7kBtj3autlfGEskuTJYpeZMYbFdHIdA2erpvho";
-        assert!(auth::verify_password("s3cret", legacy).await.unwrap());
-        assert!(!auth::verify_password("wrong", legacy).await.unwrap());
+        // before the 0.6 upgrade must keep verifying. Shared with the login
+        // timing-equalization dummy so the two cannot drift apart.
+        assert!(
+            auth::verify_password("s3cret", auth::DUMMY_HASH)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !auth::verify_password("wrong", auth::DUMMY_HASH)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -815,6 +1002,8 @@ mod tests {
                 ingest_tx,
                 events_tx,
                 jwt_secret: String::from("test-secret"),
+                ingest_token: None,
+                metrics: Arc::new(metrics::Metrics::default()),
                 spa: Some(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
             }),
         };

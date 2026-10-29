@@ -11,3 +11,6 @@ spec:
   nodeSelector: {}
   apiUrl: http://mist-api.mist.svc.cluster.local:3000
   objectPath: /etc/mist/mist-ebpf.o
+  # Agents authenticate ingest from this Secret's `ingest-token` key (see
+  # deploy/api-auth-secret.example). Omit for open ingest (dev only).
+  apiTokenSecretName: mist-api-auth

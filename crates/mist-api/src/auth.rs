@@ -20,26 +20,48 @@ struct Claims {
 /// Token lifetime: 24 hours, in seconds.
 const TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// Insecure fallback secret, used only when `JWT_SECRET` is unset (dev only).
-pub const DEV_JWT_SECRET: &str = "dev-secret-change-me";
-
-/// Returns the HS256 signing secret from `JWT_SECRET`.
+/// Reads the HS256 signing secret from `JWT_SECRET`.
 ///
-/// Falls back to an insecure dev default with a loud warning when unset.
-/// The fallback keeps local development working; it must never be used with
-/// real credentials.
-#[must_use]
-pub fn jwt_secret() -> String {
-    match std::env::var("JWT_SECRET") {
-        Ok(secret) if !secret.is_empty() => secret,
-        _ => {
-            tracing::warn!(
-                "JWT_SECRET unset; using insecure dev default that must never be used in production"
-            );
-            DEV_JWT_SECRET.to_owned()
-        }
-    }
+/// Fails closed: the API refuses to start without an explicit secret, so a
+/// missing Secret/env can never silently mint dev-signed tokens. Local runs
+/// just export any value (`JWT_SECRET=dev cargo run -p mist-api`).
+///
+/// # Errors
+///
+/// Returns an error when `JWT_SECRET` is unset or empty.
+pub fn jwt_secret() -> anyhow::Result<String> {
+    std::env::var("JWT_SECRET")
+        .map_err(|_| anyhow::anyhow!("JWT_SECRET must be set"))
+        .and_then(|secret| {
+            if secret.is_empty() {
+                Err(anyhow::anyhow!("JWT_SECRET must not be empty"))
+            } else {
+                Ok(secret)
+            }
+        })
 }
+
+/// Reads the agent ingest token from `INGEST_TOKEN`.
+///
+/// `None` keeps `/api/ingest` open with a loud startup warning (dev
+/// default); `Some` requires `Authorization: Bearer <token>` on every
+/// ingest batch. Provision a high-entropy value anywhere shared.
+#[must_use]
+pub fn ingest_token() -> Option<String> {
+    let token = std::env::var("INGEST_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if token.is_none() {
+        tracing::warn!(
+            "INGEST_TOKEN unset; /api/ingest accepts unauthenticated batches — provision a token anywhere shared"
+        );
+    }
+    token
+}
+
+/// Dummy argon2id hash (for "s3cret", argon2 0.5.3 parameters) used only
+/// to equalize login timing for unknown users — its result is discarded.
+pub const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$K0MNZoOpmNPxYNBkg9beuQ$VM/3y7kBtj3autlfGEskuTJYpeZMYbFdHIdA2erpvho";
 
 /// Argon2-hash `password`, off the async runtime.
 ///

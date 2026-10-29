@@ -56,6 +56,29 @@ spec:
             {{- end }}
             - name: OPERATOR_WEBHOOK_URL
               value: {{ .Values.api.operatorWebhookUrl | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: jwt-secret
+            - name: ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: admin-email
+                  optional: true
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: admin-password
+                  optional: true
+            - name: INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: ingest-token
+                  optional: true
             - name: BIND_ADDR
               value: 0.0.0.0:3000
             - name: RUST_LOG

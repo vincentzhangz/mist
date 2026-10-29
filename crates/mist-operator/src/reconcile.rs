@@ -202,6 +202,33 @@ pub fn desired_daemonset(
         },
     }))?;
     daemonset.meta_mut().owner_references = Some(vec![owner]);
+    if let Some(secret) = &spec.api_token_secret_name {
+        // Optional ingest auth: the agent reads MIST_API_TOKEN from this
+        // Secret's `ingest-token` key and sends it as the ingest Bearer token.
+        let containers = &mut daemonset
+            .spec
+            .as_mut()
+            .and_then(|spec| spec.template.spec.as_mut())
+            .and_then(|pod| pod.containers.first_mut())
+            .context("rendered DaemonSet has no agent container")?
+            .env;
+        containers
+            .get_or_insert_with(Vec::new)
+            .push(k8s_openapi::api::core::v1::EnvVar {
+                name: "MIST_API_TOKEN".to_owned(),
+                value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+                    secret_key_ref: Some(k8s_openapi::api::core::v1::SecretKeySelector {
+                        name: secret.clone(),
+                        key: "ingest-token".to_owned(),
+                        // Missing key/Secret leaves the env unset (agent
+                        // sends no token) instead of blocking the pod.
+                        optional: Some(true),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+    }
     Ok(daemonset)
 }
 
@@ -292,6 +319,32 @@ mod tests {
         assert_eq!(owners[0]["name"], "custom");
         assert_eq!(owners[0]["uid"], "uid-custom");
         assert_eq!(value["metadata"]["labels"]["mist.io/monitor"], "custom");
+    }
+
+    #[test]
+    fn api_token_secret_adds_env_from_secret() {
+        let mut monitor = monitor_with("tokened", "2026-10-28T09:00:00Z");
+        monitor.spec.api_token_secret_name = Some("mist-api-auth".to_owned());
+        let daemonset = desired_daemonset(&monitor, "tokened").unwrap();
+        let value = serde_json::to_value(&daemonset).unwrap();
+        let env = value["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let token = env
+            .iter()
+            .find(|entry| entry["name"] == "MIST_API_TOKEN")
+            .unwrap();
+        assert_eq!(
+            token["valueFrom"]["secretKeyRef"],
+            json!({ "name": "mist-api-auth", "key": "ingest-token", "optional": true })
+        );
+        // Unset by default: no token env without the spec field.
+        let plain = monitor_with("plain", "2026-10-28T09:00:00Z");
+        let value = serde_json::to_value(desired_daemonset(&plain, "plain").unwrap()).unwrap();
+        let env = value["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        assert!(env.iter().all(|entry| entry["name"] != "MIST_API_TOKEN"));
     }
 
     /// The rendered `DaemonSet` must match the golden fixture (minus

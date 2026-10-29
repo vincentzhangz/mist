@@ -95,6 +95,18 @@ impl Store {
         }
     }
 
+    /// Live storage gauges for the `/metrics` scrape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage backend fails.
+    pub async fn counts(&self) -> anyhow::Result<crate::metrics::StoreCounts> {
+        match self {
+            Self::Postgres(store) => store.counts().await,
+            Self::Memory(store) => store.counts(),
+        }
+    }
+
     /// Insert or replace the password hash for `email`.
     ///
     /// # Errors
@@ -277,6 +289,29 @@ impl PgStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(AlertRow::into_view))
+    }
+
+    async fn counts(&self) -> anyhow::Result<crate::metrics::StoreCounts> {
+        let flows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flows")
+            .fetch_one(&self.pool)
+            .await?;
+        let states: Vec<(String, i64)> =
+            sqlx::query_as("SELECT state, COUNT(*) FROM alerts GROUP BY state")
+                .fetch_all(&self.pool)
+                .await?;
+        let mut counts = crate::metrics::StoreCounts {
+            flows: u64::try_from(flows).unwrap_or(0),
+            ..crate::metrics::StoreCounts::default()
+        };
+        for (state, count) in states {
+            let count = u64::try_from(count).unwrap_or(0);
+            match state.as_str() {
+                "firing" => counts.alerts_firing = count,
+                "resolved" => counts.alerts_resolved = count,
+                _ => {}
+            }
+        }
+        Ok(counts)
     }
 
     async fn upsert_user(&self, email: &str, password_hash: &str) -> anyhow::Result<()> {
@@ -557,6 +592,28 @@ impl MemStore {
             state: stored.state,
             occurrences: stored.occurrences,
         }))
+    }
+
+    fn counts(&self) -> anyhow::Result<crate::metrics::StoreCounts> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
+        let mut counts = crate::metrics::StoreCounts {
+            flows: u64::try_from(state.flows.len()).unwrap_or(u64::MAX),
+            ..crate::metrics::StoreCounts::default()
+        };
+        for stored in state.alerts.values() {
+            match stored.state {
+                AlertLifecycle::Firing => {
+                    counts.alerts_firing = counts.alerts_firing.saturating_add(1);
+                }
+                AlertLifecycle::Resolved => {
+                    counts.alerts_resolved = counts.alerts_resolved.saturating_add(1);
+                }
+            }
+        }
+        Ok(counts)
     }
 
     fn upsert_user(&self, email: &str, password_hash: &str) -> anyhow::Result<()> {

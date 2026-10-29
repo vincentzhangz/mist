@@ -515,21 +515,44 @@ pub async fn enrich_alert(explainer: &impl Explainer, alert: &mut Alert, flows: 
     alert.explanation = explainer.explanation_for(alert, flows).await;
 }
 
+/// Wires for [`run_analyzer`]: channels, storage, webhook, config, metrics.
+pub struct AnalyzerDeps {
+    /// Ingest batches from `/api/ingest`.
+    pub rx: mpsc::Receiver<FlowBatch>,
+    /// Flow + alert storage.
+    pub store: Store,
+    /// Live-event fan-out to websocket connections.
+    pub alerts_tx: broadcast::Sender<AlertEvent>,
+    /// HTTP client for the operator mirror webhook.
+    pub http: reqwest::Client,
+    /// Operator webhook URL; `None` disables `AnomalyAlert` mirroring.
+    pub webhook_url: Option<String>,
+    /// Detector thresholds.
+    pub config: DetectorConfig,
+    /// Process counters served by `/metrics`.
+    pub metrics: std::sync::Arc<crate::metrics::Metrics>,
+}
+
 /// Background analyzer task: persist flows, score batches, store + broadcast
 /// alerts, and mirror them to the operator webhook (best-effort).
-pub async fn run_analyzer(
-    mut rx: mpsc::Receiver<FlowBatch>,
-    store: Store,
-    alerts_tx: broadcast::Sender<AlertEvent>,
-    http: reqwest::Client,
-    webhook_url: Option<String>,
-    config: DetectorConfig,
-    explainer: impl Explainer,
-) {
+pub async fn run_analyzer(deps: AnalyzerDeps, explainer: impl Explainer) {
+    let AnalyzerDeps {
+        mut rx,
+        store,
+        alerts_tx,
+        http,
+        webhook_url,
+        config,
+        metrics,
+    } = deps;
     let mut state = AnalyzerState::default();
     while let Some(batch) = rx.recv().await {
-        if let Err(error) = store.save_flows(&batch.flows).await {
-            tracing::warn!(?error, "flow persistence failed");
+        match store.save_flows(&batch.flows).await {
+            Ok(()) => metrics.batch_persisted(batch.flows.len()),
+            Err(error) => {
+                tracing::warn!(?error, "flow persistence failed");
+                metrics.persistence_failed();
+            }
         }
         if !batch.flows.is_empty() {
             let _ = alerts_tx.send(AlertEvent::Flows {
@@ -540,6 +563,7 @@ pub async fn run_analyzer(
             enrich_alert(&explainer, &mut alert, &batch.flows).await;
             match store.upsert_alert(&alert).await {
                 Ok(view) => {
+                    metrics.alert_fired();
                     let _ = alerts_tx.send(AlertEvent::Alert {
                         alert: view.clone(),
                     });
@@ -547,6 +571,7 @@ pub async fn run_analyzer(
                         && let Err(error) = http.post(url).json(&alert).send().await
                     {
                         tracing::warn!(?error, url = %url, "operator webhook call failed");
+                        metrics.webhook_failed();
                     }
                     tracing::info!(id = %view.alert.id, severity = ?view.alert.severity, "alert upserted");
                 }

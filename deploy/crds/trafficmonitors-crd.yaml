@@ -18,12 +18,20 @@ spec:
           spec:
             description: |-
               Desired state of mist traffic monitoring. The operator renders the agent
-              DaemonSet from the oldest instance in its namespace; any additional
+              `DaemonSet` from the oldest instance in its namespace; any additional
               instances are marked `Superseded` in status.
             properties:
               agentImage:
                 default: mist-agent:dev
                 description: Agent container image.
+                type: string
+              apiTokenSecretName:
+                description: |-
+                  Name of a Secret holding the agent ingest token (key
+                  `ingest-token`, same Secret/key the API reads `INGEST_TOKEN` from).
+                  When set, the agent container gets `MIST_API_TOKEN` from it and
+                  authenticates `POST /api/ingest`; when unset, agents send no token.
+                nullable: true
                 type: string
               apiUrl:
                 default: http://mist-api.mist.svc.cluster.local:3000
@@ -33,7 +41,7 @@ spec:
                 additionalProperties:
                   type: string
                 default: {}
-                description: DaemonSet node selector; empty schedules on all nodes.
+                description: '`DaemonSet` node selector; empty schedules on all nodes.'
                 type: object
               objectPath:
                 default: /etc/mist/mist-ebpf.o
@@ -81,3 +89,4 @@ spec:
     storage: true
     subresources:
       status: {}
+
