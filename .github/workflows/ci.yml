@@ -83,6 +83,8 @@ jobs:
           export PATH="$CARGO_HOME/bin:$PATH"
           rustup --version >/dev/null 2>&1 || \
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          rustup toolchain install stable
+          rustup default stable
           rustup target add wasm32-unknown-unknown
           cargo install trunk --version 0.22.1 --locked
       - name: Build dashboard bundle
