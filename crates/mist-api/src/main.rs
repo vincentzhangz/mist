@@ -13,21 +13,26 @@
 //! Dashboard access uses email+password login (`POST /api/auth/login`)
 //! issuing HS256 JWTs; every `/api/*` route except the login and the WS
 //! handshake (which takes `?token=`) requires one. Agent ingest requires
-//! the provisioned `INGEST_TOKEN` as `Bearer` when configured, and stays
-//! open otherwise. `JWT_SECRET` is required at startup (fail closed).
+//! one of the provisioned `INGEST_TOKEN`/`INGEST_TOKENS` as `Bearer` when
+//! configured, and stays open otherwise. `JWT_SECRET` is required at
+//! startup (fail closed).
 
 mod analyzer;
 mod auth;
 mod metrics;
+mod ratelimit;
 mod store;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use analyzer::AlertEvent;
 use axum::{
     Router,
     body::Body,
-    extract::{Path, Query, State, WebSocketUpgrade},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State, WebSocketUpgrade},
     http::{Request, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Json},
@@ -54,9 +59,11 @@ struct AppStateInner {
     ingest_tx: mpsc::Sender<FlowBatch>,
     events_tx: broadcast::Sender<AlertEvent>,
     jwt_secret: String,
-    /// Required `Bearer` token for `/api/ingest`; `None` leaves ingest open.
-    ingest_token: Option<String>,
+    /// Accepted `Bearer` tokens for `/api/ingest`; empty leaves ingest open.
+    ingest_tokens: Vec<String>,
     metrics: std::sync::Arc<metrics::Metrics>,
+    /// Per-IP sliding-window guard for the login endpoint.
+    login_limiter: ratelimit::LoginLimiter,
     /// Dashboard SPA file service; `None` runs API-only.
     spa: Option<ServeDir<ServeFile>>,
 }
@@ -207,10 +214,48 @@ struct LoginResponse {
     email: String,
 }
 
+/// Client socket address when connection info is present. Infallible:
+/// unit tests serve without it, so those attempts share one bucket.
+struct MaybePeer(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for MaybePeer
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0),
+        )))
+    }
+}
+
 async fn login(
     State(state): State<AppState>,
+    maybe_peer: MaybePeer,
     Json(request): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    // Brute-force guard, checked before any hashing: per-IP sliding window.
+    // Without connection info (unit tests) all attempts share one bucket.
+    let peer = maybe_peer
+        .0
+        .map_or_else(|| IpAddr::from([0, 0, 0, 0]), |addr| addr.ip());
+    if let ratelimit::Verdict::Deny { retry_after_secs } = state.inner.login_limiter.check(peer) {
+        state.inner.metrics.login_limited();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after_secs.to_string())],
+            Json(serde_json::json!({ "error": "too many login attempts" })),
+        )
+            .into_response();
+    }
     let stored = match state.inner.store.get_password_hash(&request.email).await {
         Ok(stored) => stored,
         Err(error) => {
@@ -272,8 +317,9 @@ fn bearer_token(req: &Request<Body>) -> Option<&str> {
 ///
 /// Public without a token: `/healthz`, `/metrics`, `POST /api/auth/login`,
 /// and `/api/ws` (the token travels in `?token=` instead, checked in
-/// [`ws_handler`]). `/api/ingest` requires the provisioned `INGEST_TOKEN`
-/// as `Bearer` when one is configured, and stays open otherwise.
+/// [`ws_handler`]). `/api/ingest` requires one of the provisioned
+/// `INGEST_TOKEN`/`INGEST_TOKENS` as `Bearer` when any is configured, and
+/// stays open otherwise.
 /// Everything else under `/api/` requires `Authorization: Bearer <jwt>`.
 async fn require_auth(
     State(state): State<AppState>,
@@ -292,13 +338,9 @@ async fn require_auth(
         return next.run(req).await;
     }
     if path == "/api/ingest" {
-        let open = state.inner.ingest_token.is_none();
-        let token_ok = state
-            .inner
-            .ingest_token
-            .as_deref()
-            .is_some_and(|expected| bearer_token(&req) == Some(expected));
-        if open || token_ok {
+        let tokens = &state.inner.ingest_tokens;
+        let token_ok = bearer_token(&req).is_some_and(|got| tokens.iter().any(|t| t == got));
+        if tokens.is_empty() || token_ok {
             return next.run(req).await;
         }
         return unauthorized();
@@ -470,12 +512,12 @@ async fn seed_admin(store: &Store) {
 
 #[cfg(test)]
 fn test_state() -> (AppState, mpsc::Receiver<FlowBatch>) {
-    test_state_with_ingest_token(None)
+    test_state_with_ingest_tokens(Vec::new())
 }
 
 #[cfg(test)]
-fn test_state_with_ingest_token(
-    ingest_token: Option<String>,
+fn test_state_with_ingest_tokens(
+    ingest_tokens: Vec<String>,
 ) -> (AppState, mpsc::Receiver<FlowBatch>) {
     let (ingest_tx, ingest_rx) = mpsc::channel(16);
     let (events_tx, _) = broadcast::channel(16);
@@ -485,8 +527,9 @@ fn test_state_with_ingest_token(
             ingest_tx,
             events_tx,
             jwt_secret: String::from("test-secret"),
-            ingest_token,
+            ingest_tokens,
             metrics: Arc::new(metrics::Metrics::default()),
+            login_limiter: ratelimit::LoginLimiter::default(),
             spa: None,
         }),
     };
@@ -524,7 +567,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let jwt_secret = auth::jwt_secret()?;
-    let ingest_token = auth::ingest_token();
+    let ingest_tokens = auth::ingest_tokens();
     seed_admin(&store).await;
 
     let (ingest_tx, ingest_rx) = mpsc::channel(64);
@@ -564,8 +607,9 @@ async fn main() -> anyhow::Result<()> {
             ingest_tx,
             events_tx,
             jwt_secret,
-            ingest_token,
+            ingest_tokens,
             metrics: api_metrics,
+            login_limiter: ratelimit::LoginLimiter::default(),
             spa,
         }),
     };
@@ -627,7 +671,8 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_requires_token_when_configured() {
-        let (state, _rx) = test_state_with_ingest_token(Some("s3cret".to_owned()));
+        let (state, _rx) =
+            test_state_with_ingest_tokens(vec!["s3cret".to_owned(), "r0tated".to_owned()]);
         let post = |bearer: Option<&str>| {
             let mut request = Request::post("/api/ingest")
                 .header("content-type", "application/json")
@@ -646,6 +691,9 @@ mod tests {
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
         let ok = post(Some("s3cret")).await.unwrap();
         assert_eq!(ok.status(), StatusCode::ACCEPTED);
+        // Any token in the set is accepted (rotation / per-agent tokens).
+        let rotated = post(Some("r0tated")).await.unwrap();
+        assert_eq!(rotated.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -847,6 +895,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_rate_limits_after_ten_attempts() {
+        let (state, _rx) = test_state();
+        seed_user(&state).await;
+        for attempt in 1..=11 {
+            let response = router(state.clone())
+                .oneshot(login_request("admin@example.com", "wrong"))
+                .await
+                .unwrap();
+            if attempt <= 10 {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                let retry_after: u64 = response
+                    .headers()
+                    .get("retry-after")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!((1..=60).contains(&retry_after));
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["error"], "too many login attempts");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_argon2_hash_still_verifies() {
         // Reference hash produced by argon2 0.5.3 for "s3cret": rows written
         // before the 0.6 upgrade must keep verifying. Shared with the login
@@ -1002,8 +1081,9 @@ mod tests {
                 ingest_tx,
                 events_tx,
                 jwt_secret: String::from("test-secret"),
-                ingest_token: None,
+                ingest_tokens: Vec::new(),
                 metrics: Arc::new(metrics::Metrics::default()),
+                login_limiter: ratelimit::LoginLimiter::default(),
                 spa: Some(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
             }),
         };

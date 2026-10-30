@@ -45,11 +45,13 @@ api:
   # --set for any shared environment (the chart default is dev-only);
   # adminEmail/adminPassword seed the dashboard login (empty: login fails
   # closed); ingestToken, when non-empty, is required as the Bearer token
-  # on POST /api/ingest (empty: ingest stays open, dev only).
+  # on POST /api/ingest (empty: ingest stays open, dev only). ingestTokens
+  # (comma-separated) accepts additional tokens for rotation/per-agent use.
   jwtSecret: "dev-only-change-me"
   adminEmail: ""
   adminPassword: ""
   ingestToken: ""
+  ingestTokens: ""
   resources:
     requests:
       cpu: 50m

@@ -36,6 +36,8 @@ pub struct Metrics {
     alerts_fired: AtomicU64,
     /// Failed `AnomalyAlert` mirror webhook calls.
     webhook_failures: AtomicU64,
+    /// Login attempts rejected by the rate limiter.
+    logins_limited: AtomicU64,
     started_at: Instant,
 }
 
@@ -49,6 +51,7 @@ impl Default for Metrics {
             persistence_failures: AtomicU64::new(0),
             alerts_fired: AtomicU64::new(0),
             webhook_failures: AtomicU64::new(0),
+            logins_limited: AtomicU64::new(0),
             started_at: Instant::now(),
         }
     }
@@ -88,101 +91,110 @@ impl Metrics {
         self.webhook_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one login attempt rejected by the rate limiter.
+    pub fn login_limited(&self) {
+        self.logins_limited.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn load(counter: &AtomicU64) -> u64 {
         counter.load(Ordering::Relaxed)
+    }
+
+    fn emit(out: &mut String, name: &str, help: &str, kind: &str, value: u64) {
+        out.push_str("# HELP ");
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(help);
+        out.push_str("\n# TYPE ");
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(kind);
+        out.push('\n');
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+
+    fn emit_counter(out: &mut String, name: &str, help: &str, value: u64) {
+        Self::emit(out, name, help, "counter", value);
+    }
+
+    fn emit_gauge(out: &mut String, name: &str, help: &str, value: u64) {
+        Self::emit(out, name, help, "gauge", value);
     }
 
     /// Render process counters plus `store` gauges in exposition format.
     #[must_use]
     pub fn render(&self, store: &StoreCounts) -> String {
         let mut out = String::new();
-        let counter = |out: &mut String, name: &str, help: &str, value: u64| {
-            out.push_str("# HELP ");
-            out.push_str(name);
-            out.push(' ');
-            out.push_str(help);
-            out.push_str("\n# TYPE ");
-            out.push_str(name);
-            out.push_str(" counter\n");
-            out.push_str(name);
-            out.push(' ');
-            out.push_str(&value.to_string());
-            out.push('\n');
-        };
-        let gauge = |out: &mut String, name: &str, help: &str, value: u64| {
-            out.push_str("# HELP ");
-            out.push_str(name);
-            out.push(' ');
-            out.push_str(help);
-            out.push_str("\n# TYPE ");
-            out.push_str(name);
-            out.push_str(" gauge\n");
-            out.push_str(name);
-            out.push(' ');
-            out.push_str(&value.to_string());
-            out.push('\n');
-        };
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_ingest_batches_accepted_total",
             "Flow batches accepted into the analyzer channel.",
             Self::load(&self.ingest_batches_accepted),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_ingest_flows_accepted_total",
             "Flow records accepted into the analyzer channel.",
             Self::load(&self.ingest_flows_accepted),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_ingest_batches_shed_total",
             "Flow batches shed while the analyzer channel was saturated.",
             Self::load(&self.ingest_batches_shed),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_flows_persisted_total",
             "Flow records persisted by the analyzer.",
             Self::load(&self.flows_persisted),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_persistence_failures_total",
             "Batches whose flow persistence failed.",
             Self::load(&self.persistence_failures),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_alerts_fired_total",
             "Alerts fired by the analyzer.",
             Self::load(&self.alerts_fired),
         );
-        counter(
+        Self::emit_counter(
             &mut out,
             "mist_api_webhook_failures_total",
             "Failed AnomalyAlert mirror webhook calls.",
             Self::load(&self.webhook_failures),
         );
-        gauge(
+        Self::emit_counter(
+            &mut out,
+            "mist_api_logins_limited_total",
+            "Login attempts rejected by the rate limiter.",
+            Self::load(&self.logins_limited),
+        );
+        Self::emit_gauge(
             &mut out,
             "mist_api_flows_stored",
             "Flow records currently in storage.",
             store.flows,
         );
-        gauge(
+        Self::emit_gauge(
             &mut out,
             "mist_api_alerts_firing",
             "Alerts currently firing.",
             store.alerts_firing,
         );
-        gauge(
+        Self::emit_gauge(
             &mut out,
             "mist_api_alerts_resolved",
             "Alerts currently resolved.",
             store.alerts_resolved,
         );
-        gauge(
+        Self::emit_gauge(
             &mut out,
             "mist_api_uptime_seconds",
             "Seconds since process start.",
@@ -211,6 +223,7 @@ mod tests {
         metrics.persistence_failed();
         metrics.alert_fired();
         metrics.webhook_failed();
+        metrics.login_limited();
         let store = StoreCounts {
             flows: 42,
             alerts_firing: 2,
@@ -227,6 +240,7 @@ mod tests {
             "mist_api_persistence_failures_total 1",
             "mist_api_alerts_fired_total 1",
             "mist_api_webhook_failures_total 1",
+            "mist_api_logins_limited_total 1",
             "# TYPE mist_api_flows_stored gauge",
             "mist_api_flows_stored 42",
             "mist_api_alerts_firing 2",

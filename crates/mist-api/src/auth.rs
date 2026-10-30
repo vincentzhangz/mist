@@ -41,22 +41,41 @@ pub fn jwt_secret() -> anyhow::Result<String> {
         })
 }
 
-/// Reads the agent ingest token from `INGEST_TOKEN`.
+/// Reads one comma-separated value into trimmed, non-empty tokens.
+fn split_tokens(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Reads the accepted agent ingest tokens: `INGEST_TOKEN` plus every entry
+/// of comma-separated `INGEST_TOKENS`.
 ///
-/// `None` keeps `/api/ingest` open with a loud startup warning (dev
-/// default); `Some` requires `Authorization: Bearer <token>` on every
-/// ingest batch. Provision a high-entropy value anywhere shared.
+/// An empty set keeps `/api/ingest` open with a loud startup warning (dev
+/// default); otherwise every ingest batch needs `Authorization: Bearer`
+/// with one of these tokens. Multiple entries enable rotation (add the new
+/// token, roll the agents, remove the old one) and per-agent tokens.
+/// Provision high-entropy values anywhere shared.
 #[must_use]
-pub fn ingest_token() -> Option<String> {
-    let token = std::env::var("INGEST_TOKEN")
+pub fn ingest_tokens() -> Vec<String> {
+    let mut tokens = std::env::var("INGEST_TOKEN")
         .ok()
-        .filter(|value| !value.is_empty());
-    if token.is_none() {
+        .map(|value| split_tokens(&value))
+        .unwrap_or_default();
+    if let Ok(extra) = std::env::var("INGEST_TOKENS") {
+        tokens.extend(split_tokens(&extra));
+    }
+    tokens.sort();
+    tokens.dedup();
+    if tokens.is_empty() {
         tracing::warn!(
-            "INGEST_TOKEN unset; /api/ingest accepts unauthenticated batches — provision a token anywhere shared"
+            "INGEST_TOKEN/INGEST_TOKENS unset; /api/ingest accepts unauthenticated batches — provision a token anywhere shared"
         );
     }
-    token
+    tokens
 }
 
 /// Dummy argon2id hash (for "s3cret", argon2 0.5.3 parameters) used only
@@ -139,4 +158,19 @@ pub fn verify_token(token: &str, secret: &str) -> Option<String> {
     )
     .ok()
     .map(|data| data.claims.sub)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_tokens_trims_and_drops_empties() {
+        assert_eq!(split_tokens(""), Vec::<String>::new());
+        assert_eq!(split_tokens("abc"), vec!["abc".to_owned()]);
+        assert_eq!(
+            split_tokens(" one ,, two ,three "),
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
+        );
+    }
 }
