@@ -9,3 +9,6 @@ crates/mist-dashboard/dist/
 
 # Local API auth Secret (real credentials; the .example is the template).
 deploy/api-auth-secret.yaml
+
+# Browser-proof dependencies (the package-lock stays committed).
+e2e/browser/node_modules/
