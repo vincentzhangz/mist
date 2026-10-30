@@ -23,6 +23,9 @@ spec:
         app.kubernetes.io/name: mist-postgres
         app.kubernetes.io/part-of: mist
     spec:
+      # fsGroup lets the postgres uid (70) write provisioned volumes.
+      securityContext:
+        fsGroup: 70
       containers:
         - name: postgres
           image: {{ .Values.postgres.image | quote }}
@@ -41,9 +44,13 @@ spec:
                   key: password
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
+            # Postgres 18+ images require PGDATA in a versioned subdirectory
+            # (see docker-library/postgres#1259); mount at the parent.
+            - name: PGDATA
+              value: /var/lib/postgresql/18/docker
           volumeMounts:
             - name: data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
       {{- if not .Values.postgres.persistence.enabled }}
       volumes:
         - name: data

@@ -1,6 +1,8 @@
 # Postgres for mist-api flow history and alerts.
-# Dev-grade: single replica, ephemeral storage. Production would use a
-# managed database or PVC-backed StatefulSet with backups.
+# Single replica with a PVC (10Gi, default StorageClass); production
+# should use a managed database or add backups + a tuned storage class.
+# Migrating an existing emptyDir install: delete the StatefulSet first
+# (claim templates are immutable), which drops its stored flows/alerts.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -34,6 +36,9 @@ spec:
         app.kubernetes.io/name: mist-postgres
         app.kubernetes.io/part-of: mist
     spec:
+      # fsGroup lets the postgres uid (70) write the provisioned volume.
+      securityContext:
+        fsGroup: 70
       containers:
         - name: postgres
           image: postgres:18-alpine
@@ -59,9 +64,14 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql
-      volumes:
-        - name: data
-          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
