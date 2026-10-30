@@ -80,6 +80,30 @@ as `AnomalyAlert` custom resources.
 - **Privileges**: the agent needs `hostNetwork`, `privileged`
   (`CAP_BPF`/`CAP_NET_ADMIN` semantics), `/sys` mounted read-only, and
   `get/list/watch pods` + `get/list nodes` RBAC.
+- **Interface rescan**: the agent attaches at startup, then re-scans
+  `/sys/class/net` every 30s and attaches new interfaces (pod churn
+  constantly creates veths; without this any pod born after startup is
+  invisible). Explicit `--iface` disables the rescan.
+
+## Load-test notes (kind, single node, 2026-10-30)
+
+- **Throughput**: `iperf3 -P 16 -t 60` between pods at 229 Gb/s
+  (veth GRO presents large segments, so ≈540k pps at the sensor):
+  tracked with `map_full=0`, no load-correlated skips, 56–102
+  flows/drain.
+- **Flow-count burst**: 3000 HTTP connections in ~30s produced a single
+  16,372-flow drain — essentially the 16,384-entry map capacity
+  (cold DNS cache multiplied each connection into several 5-tuples).
+  `map_full` stayed 0 but headroom was exhausted: raise
+  `max_entries`, shorten the drain interval, or shard before trusting
+  denser clusters.
+- **Persistence**: the same burst exposed row-by-row `INSERT`s stalling
+  the analyzer for minutes; `save_flows` is now one `UNNEST` statement
+  per 2000-row chunk (verified: 2500 rows persist in seconds, burst
+  drains land within one interval).
+- **Detector tuning**: the burst's DNS fan-out tripped port-scan alerts
+  (`scan:<pod>:17:...`) — thresholds assume steadier traffic and may
+  need per-protocol tuning for DNS-heavy sources.
 
 ## CRDs
 

@@ -56,6 +56,14 @@ DATABASE_URL=postgres://mist:mist-dev-password@localhost:5432/mist \
 # The API serves the dashboard from crates/mist-dashboard/dist when the
 # trunk bundle exists there (API-only mode otherwise); open
 # http://127.0.0.1:3000/login with the admin above.
+
+# Local HTTPS: generate a throwaway cert and point the API at it.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout /tmp/mist-key.pem -out /tmp/mist-cert.pem \
+  -subj '/CN=localhost' >/dev/null 2>&1
+TLS_CERT=/tmp/mist-cert.pem TLS_KEY=/tmp/mist-key.pem \
+  JWT_SECRET=dev-only cargo run -p mist-api
+# curl -k https://127.0.0.1:3000/healthz   # -> ok
 ```
 
 ## Linux VM notes

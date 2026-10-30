@@ -37,7 +37,7 @@ Anything else under `/api/*` returns a JSON 404 (never the SPA shell).
 |---|---|
 | `JWT_SECRET` | HS256 signing key. **Required** — the API refuses to start without it (fail closed). Set a random value (`openssl rand -hex 32`); local runs just export any value. |
 | `ADMIN_EMAIL` + `ADMIN_PASSWORD` | Bootstrap admin: hashed (argon2) and upserted at every startup. If either is unset, nothing is seeded and login fails closed (401 for everyone). |
-| `INGEST_TOKEN` | Shared agent credential. When set, `/api/ingest` requires it as `Bearer`; when unset, ingest stays open with a loud warning. Agents send `--api-token` / `MIST_API_TOKEN` (the operator injects it from the monitor's `apiTokenSecretName`). Provision a high-entropy value anywhere shared. |
+| `INGEST_TOKEN` + `INGEST_TOKENS` | Accepted agent credentials (single + comma-separated list). When any is set, `/api/ingest` requires one as `Bearer`; when unset, ingest stays open with a loud warning. Agents send `--api-token` / `MIST_API_TOKEN` (the operator injects it from the monitor's `apiTokenSecretName`). Rotate by appending the new token, rolling agents, removing the old. Provision high-entropy values anywhere shared. |
 | `DATABASE_URL` | With Postgres the users table persists (migration `002_auth.sql`); without it the in-memory store still accepts the seeded admin, but users vanish on restart. |
 
 In-cluster all four come from one Secret: `deploy/api-auth-secret.example`
@@ -58,7 +58,10 @@ chart renders it from `api.jwtSecret` / `api.adminEmail` /
 
 ## Roadmap (not implemented)
 
-Ingest uses one shared token today; per-node tokens or mTLS would bound
-the blast radius of a leaked agent credential. Login has no rate
-limiting yet — do not expose it to the open internet without a
-rate-limiting ingress in front.
+Ingest accepts a token set (rotation-friendly), but per-agent tokens are
+provisioned manually and there is no per-token identity in audit trails.
+Login is rate-limited per IP (10/min, `429 + Retry-After`); defense in
+depth still favors a rate-limiting ingress in front of any
+internet-facing deployment. The API serves plain HTTP unless `TLS_CERT`
++ `TLS_KEY` are set — terminate TLS at the ingress or provision those in
+any environment where the pod network isn't trusted.

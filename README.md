@@ -107,7 +107,7 @@ deploy/            plain manifests: RBAC, CRDs, Deployments, Postgres, samples
 helm/mist/         self-contained chart (no external deps; CRDs under crds/)
 docker/            multi-stage Dockerfiles (agent, api, operator) + .dockerignore
 docs/              architecture, development, auth, demo
-.github/workflows/ ci (test/clippy/ebpf/trunk/helm) + experimental e2e-kind
+.github/workflows/ ci (test/clippy/ebpf/trunk/helm) + e2e-kind + release (GHCR on tags)
 ```
 
 ## Config reference
@@ -124,7 +124,8 @@ Verified against the code — no invented knobs.
 | `RUST_LOG` | `info` | Tracing filter |
 | `JWT_SECRET` | **required** — API refuses to start without it | HS256 signing key; set to a random value (`openssl rand -hex 32`) |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset → login fails closed (401) | Bootstrap admin, argon2-hashed + upserted at startup |
-| `INGEST_TOKEN` | unset → ingest open + loud warning | Shared agent credential, required as `Bearer` on `/api/ingest` when set |
+| `INGEST_TOKEN` / `INGEST_TOKENS` | unset → ingest open + loud warning | Accepted agent credentials (single + comma-separated), required as `Bearer` on `/api/ingest` when any is set |
+| `TLS_CERT` / `TLS_KEY` | unset → plain HTTP | PEM certificate + key paths; both set serves HTTPS, exactly one set is a startup error |
 | `SERVE_DIR` | `crates/mist-dashboard/dist` | Dashboard bundle dir; missing `index.html` → API-only mode |
 
 Detector tuning is compiled defaults, not env
@@ -175,20 +176,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   per-node credentials or mTLS before treating agents as untrusted. Login
   has no rate limiting yet — keep a rate-limiting ingress in front of any
   internet-facing deployment.
-- **Images are `:dev` placeholders** in `deploy/` and chart defaults;
-  all three Dockerfiles build and were verified kind-loaded (TC attach,
-  REST, dashboard, `/metrics` all proven live), but nothing has been
-  pushed to a registry.
-- **Postgres is dev-grade**: `emptyDir` in `deploy/` (chart default too);
-  enable `postgres.persistence` or use a managed DB.
-- **Single replica** API/operator; no TLS, no resource autoscaling;
-  eBPF map sizing under load untested.
+- **Images default to `:dev`** in `deploy/` and chart defaults (build +
+  `kind load` locally); tagging `v*` pushes `:tag` + `:latest` to GHCR
+  via the release workflow for real clusters.
+- **Postgres is single-replica**: a 10Gi PVC in `deploy/` (opt-in via
+  `postgres.persistence` in the chart); use a managed DB or add backups
+  for anything that matters.
+- **Single replica** API/operator by design (live events fan out over an
+  in-memory broadcast, so a second API replica would split the WS
+  stream — shared pub/sub first); no resource autoscaling. TLS is
+  opt-in (`TLS_CERT`/`TLS_KEY`) or terminates at your ingress.
 - **Dashboard is CSR-only**: login/flows/alerts views ship and passed a
   scripted in-browser proof (login → live flows → alerts → logout), but
   there is no SSR and no pagination; the proof script isn't committed.
 - **eBPF sensor is Linux-only** and needs BTF ≥5.15 + `clsact`;
-  sensor attach was verified live in kind but is asserted by the
-  workflow only as DaemonSet existence, not TC attach.
+  load-tested to 229 Gb/s / 16k-flow bursts in kind (see
+  `docs/architecture.md`), but the 16k map has no headroom past that —
+  size up before dense clusters.
 
 ## License
 
