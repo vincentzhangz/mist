@@ -67,7 +67,7 @@ fn run(_args: Args) -> anyhow::Result<()> {
 )]
 mod convert {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr},
     };
 
@@ -168,6 +168,18 @@ mod convert {
         now_unix_ms.saturating_sub(uptime_ms)
     }
 
+    /// Interfaces in `current` that have no program attached yet. The agent
+    /// polls this on a timer: pod churn constantly creates veths that the
+    /// startup scan never saw, and their traffic is invisible until attach.
+    #[must_use]
+    pub fn unattached_interfaces(current: &[String], attached: &HashSet<String>) -> Vec<String> {
+        current
+            .iter()
+            .filter(|name| !attached.contains(name.as_str()))
+            .cloned()
+            .collect()
+    }
+
     /// Select interfaces to attach to: skip loopback and interfaces that are
     /// down. Input is `(name, operstate)` pairs.
     #[must_use]
@@ -205,7 +217,7 @@ mod convert {
 mod linux {
     use std::{
         borrow::{Borrow, BorrowMut},
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         ffi::CString,
         net::IpAddr,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -333,13 +345,16 @@ mod linux {
             .load(&data)
             .context("loading eBPF object into kernel")?;
 
-        let ifaces = if args.iface.is_empty() {
+        let auto_detect = args.iface.is_empty();
+        let ifaces = if auto_detect {
             detect_interfaces()
         } else {
             args.iface.clone()
         };
         anyhow::ensure!(!ifaces.is_empty(), "no network interfaces to attach to");
         attach_interfaces(&mut bpf, &ifaces)?;
+        let mut attached: HashSet<String> = ifaces.into_iter().collect();
+        let mut last_rescan = Instant::now();
 
         // `take_map` moves each map out of `bpf`, so the two handles are owned
         // instead of borrowing `bpf` across each other (two `map_mut` borrows
@@ -360,6 +375,18 @@ mod linux {
         loop {
             ticker.tick().await;
             pods.refresh_if_stale().await;
+            // Pods (and their veths) churn constantly; without a rescan any
+            // pod created after startup is invisible to the sensor.
+            if auto_detect && last_rescan.elapsed() >= Duration::from_secs(30) {
+                last_rescan = Instant::now();
+                let current = detect_interfaces();
+                let new = convert::unattached_interfaces(&current, &attached);
+                if !new.is_empty() {
+                    attach_new_interfaces(&mut bpf, &new);
+                    attached.extend(new);
+                }
+                attached.retain(|iface| current.contains(iface));
+            }
             let batch = drain(&mut flows, &node, &pods.entries)?;
             let updated = read_stat(&stats_map, 0)?;
             let skipped = read_stat(&stats_map, 1)?;
@@ -498,6 +525,43 @@ mod linux {
         }
         Ok(())
     }
+
+    /// Attach the already-loaded classifiers to rescanned interfaces.
+    /// Best-effort per interface (a veth can vanish mid-scan); failures log
+    /// and the next rescan retries.
+    fn attach_new_interfaces(bpf: &mut Ebpf, ifaces: &[String]) {
+        for (prog_name, attach_type) in [
+            ("mist_ingress", TcAttachType::Ingress),
+            ("mist_egress", TcAttachType::Egress),
+        ] {
+            let program: Option<&mut SchedClassifier> = bpf
+                .program_mut(prog_name)
+                .and_then(|program| program.try_into().ok());
+            let Some(program) = program else {
+                tracing::warn!(prog = prog_name, "rescan found no loaded program");
+                continue;
+            };
+            for iface in ifaces {
+                let attached = CString::new(iface.as_str())
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+                    .and_then(|iface_c| {
+                        // Idempotent: present qdiscs error, which we ignore.
+                        let _ = tc::qdisc_add_clsact(iface_c.as_c_str());
+                        program
+                            .attach(iface_c.as_c_str(), attach_type)
+                            .map_err(anyhow::Error::from)
+                    });
+                match attached {
+                    Ok(_) => {
+                        tracing::info!(prog = prog_name, iface, "attached classifier (rescan)");
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, prog = prog_name, iface, "rescan attach failed");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -601,5 +665,28 @@ mod tests {
     #[test]
     fn node_name_is_non_empty() {
         assert_ne!(node_name(), "");
+    }
+
+    #[test]
+    fn rescan_finds_only_new_interfaces() {
+        use std::collections::HashSet;
+
+        let attached: HashSet<String> = ["eth0", "veth-old"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        // Steady state: nothing new.
+        let current = vec!["eth0".to_owned(), "veth-old".to_owned()];
+        assert_eq!(
+            unattached_interfaces(&current, &attached),
+            Vec::<String>::new()
+        );
+        // Pod churn: one new veth appears, one disappears (vanished ones
+        // are simply dropped from the set; their programs die with them).
+        let current = vec!["eth0".to_owned(), "veth-new".to_owned()];
+        assert_eq!(
+            unattached_interfaces(&current, &attached),
+            vec!["veth-new".to_owned()]
+        );
     }
 }
