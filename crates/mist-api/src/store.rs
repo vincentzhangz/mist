@@ -148,28 +148,75 @@ impl PgStore {
     }
 
     async fn save_flows(&self, flows: &[FlowRecord]) -> anyhow::Result<()> {
-        for flow in flows {
+        // One statement per chunk via UNNEST: a burst drain can hold 16k+
+        // rows, and row-by-row INSERTs stall the analyzer for minutes.
+        // Postgres caps parameters at 65535 (15 columns -> chunk at 2000).
+        let to_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        for chunk in flows.chunks(2000) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let mut nodes = Vec::with_capacity(chunk.len());
+            let mut src_ips = Vec::with_capacity(chunk.len());
+            let mut src_ports = Vec::with_capacity(chunk.len());
+            let mut dst_ips = Vec::with_capacity(chunk.len());
+            let mut dst_ports = Vec::with_capacity(chunk.len());
+            let mut protocols = Vec::with_capacity(chunk.len());
+            let mut directions = Vec::with_capacity(chunk.len());
+            let mut bytes = Vec::with_capacity(chunk.len());
+            let mut packets = Vec::with_capacity(chunk.len());
+            let mut starts = Vec::with_capacity(chunk.len());
+            let mut lasts = Vec::with_capacity(chunk.len());
+            let mut src_namespaces: Vec<Option<String>> = Vec::with_capacity(chunk.len());
+            let mut src_pods: Vec<Option<String>> = Vec::with_capacity(chunk.len());
+            let mut dst_namespaces: Vec<Option<String>> = Vec::with_capacity(chunk.len());
+            let mut dst_pods: Vec<Option<String>> = Vec::with_capacity(chunk.len());
+            for flow in chunk {
+                nodes.push(flow.node.clone());
+                src_ips.push(flow.key.src_ip.to_string());
+                src_ports.push(i32::from(flow.key.src_port));
+                dst_ips.push(flow.key.dst_ip.to_string());
+                dst_ports.push(i32::from(flow.key.dst_port));
+                protocols.push(i16::from(flow.key.protocol));
+                directions.push(direction_str(flow.direction).to_owned());
+                bytes.push(to_i64(flow.bytes));
+                packets.push(to_i64(flow.packets));
+                starts.push(to_i64(flow.start_unix_ms));
+                lasts.push(to_i64(flow.last_seen_unix_ms));
+                src_namespaces.push(flow.src_pod.as_ref().map(|pod| pod.namespace.clone()));
+                src_pods.push(flow.src_pod.as_ref().map(|pod| pod.name.clone()));
+                dst_namespaces.push(flow.dst_pod.as_ref().map(|pod| pod.namespace.clone()));
+                dst_pods.push(flow.dst_pod.as_ref().map(|pod| pod.name.clone()));
+            }
             sqlx::query(
                 "INSERT INTO flows (node, src_ip, src_port, dst_ip, dst_port, protocol, \
                  direction, bytes, packets, start_ms, last_seen_ms, \
                  src_namespace, src_pod, dst_namespace, dst_pod) \
-                 VALUES ($1, $2::INET, $3, $4::INET, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                 SELECT node, src_ip::INET, src_port, dst_ip::INET, dst_port, protocol, \
+                 direction, bytes, packets, start_ms, last_seen_ms, \
+                 src_namespace, src_pod, dst_namespace, dst_pod \
+                 FROM UNNEST($1::TEXT[], $2::TEXT[], $3::INT[], $4::TEXT[], $5::INT[], \
+                 $6::SMALLINT[], $7::TEXT[], $8::BIGINT[], $9::BIGINT[], $10::BIGINT[], \
+                 $11::BIGINT[], $12::TEXT[], $13::TEXT[], $14::TEXT[], $15::TEXT[]) \
+                 AS batch(node, src_ip, src_port, dst_ip, dst_port, protocol, \
+                 direction, bytes, packets, start_ms, last_seen_ms, \
+                 src_namespace, src_pod, dst_namespace, dst_pod)",
             )
-            .bind(&flow.node)
-            .bind(flow.key.src_ip.to_string())
-            .bind(i32::from(flow.key.src_port))
-            .bind(flow.key.dst_ip.to_string())
-            .bind(i32::from(flow.key.dst_port))
-            .bind(i16::from(flow.key.protocol))
-            .bind(direction_str(flow.direction))
-            .bind(i64::try_from(flow.bytes).unwrap_or(i64::MAX))
-            .bind(i64::try_from(flow.packets).unwrap_or(i64::MAX))
-            .bind(i64::try_from(flow.start_unix_ms).unwrap_or(i64::MAX))
-            .bind(i64::try_from(flow.last_seen_unix_ms).unwrap_or(i64::MAX))
-            .bind(flow.src_pod.as_ref().map(|pod| pod.namespace.as_str()))
-            .bind(flow.src_pod.as_ref().map(|pod| pod.name.as_str()))
-            .bind(flow.dst_pod.as_ref().map(|pod| pod.namespace.as_str()))
-            .bind(flow.dst_pod.as_ref().map(|pod| pod.name.as_str()))
+            .bind(nodes)
+            .bind(src_ips)
+            .bind(src_ports)
+            .bind(dst_ips)
+            .bind(dst_ports)
+            .bind(protocols)
+            .bind(directions)
+            .bind(bytes)
+            .bind(packets)
+            .bind(starts)
+            .bind(lasts)
+            .bind(src_namespaces)
+            .bind(src_pods)
+            .bind(dst_namespaces)
+            .bind(dst_pods)
             .execute(&self.pool)
             .await?;
         }
