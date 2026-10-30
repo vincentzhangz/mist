@@ -6,27 +6,29 @@ use crate::api::fetch_flows;
 use crate::dto::{Direction, protocol_name};
 use crate::state::{AppState, format_time_ms, pod_label};
 
+/// Snapshot sizes offered by the flows limit control.
+const FLOW_LIMITS: [usize; 3] = [100, 200, 500];
+
 /// Flows table: time / node / pod / direction / src→dst / proto / bytes / packets.
 #[component]
 pub fn FlowsView() -> impl IntoView {
     let state = expect_context::<AppState>();
     let loading = RwSignal::new(true);
     let error = RwSignal::new(Option::<String>::None);
-    let loaded_once = RwSignal::new(false);
+    let limit = RwSignal::new(200_usize);
 
-    // Initial REST load (WS prepends on top of this).
+    // REST snapshot, reloaded whenever the token or limit changes
+    // (WS prepends on top of this).
     Effect::new(move || {
         let Some(token) = state.token.get() else {
             return;
         };
-        if loaded_once.get_untracked() {
-            return;
-        }
-        loaded_once.set(true);
+        let limit = limit.get();
+        loading.set(true);
         let flows_signal = state.flows;
         let session = state;
         leptos::task::spawn_local(async move {
-            match fetch_flows(&token, 200).await {
+            match fetch_flows(&token, limit).await {
                 Ok(flows) => {
                     flows_signal.set(flows);
                     error.set(None);
@@ -43,6 +45,24 @@ pub fn FlowsView() -> impl IntoView {
     view! {
         <section class="flows">
             <h2>"Flows"</h2>
+            <div class="filters">
+                <label>
+                    "Limit"
+                    <select
+                        on:change=move |ev| {
+                            limit.set(event_target_value(&ev).parse().unwrap_or(200));
+                        }
+                        prop:value=move || limit.get().to_string()
+                    >
+                        {FLOW_LIMITS
+                            .into_iter()
+                            .map(|n| {
+                                view! { <option value=n.to_string()>{n.to_string()}</option> }
+                            })
+                            .collect::<Vec<_>>()}
+                    </select>
+                </label>
+            </div>
             <Show when=move || error.get().is_some()>
                 <p class="error" aria-live="polite">
                     {move || error.get().unwrap_or_default()}

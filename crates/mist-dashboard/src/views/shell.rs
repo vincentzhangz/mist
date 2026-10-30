@@ -4,12 +4,13 @@ use futures::StreamExt;
 use leptos::prelude::*;
 use leptos_router::components::{A, Outlet, Redirect};
 
-use crate::api::ws_url;
+use crate::api::{fetch_alerts, ws_url};
 use crate::dto::{AlertView, WsEvent, parse_ws_event};
 use crate::state::{AppState, WsStatus};
 
 /// Maximum flow rows kept in memory (initial load + live prepend).
-const MAX_FLOWS: usize = 200;
+/// Matches the largest limit the flows view offers.
+const MAX_FLOWS: usize = 500;
 /// Maximum alerts kept in memory when patched by WS events.
 const MAX_ALERTS: usize = 500;
 
@@ -38,6 +39,12 @@ fn upsert_alert(alerts: &RwSignal<Vec<AlertView>>, alert: AlertView) {
 /// or the session token changed (caller should stop reconnecting then).
 async fn run_ws(url: &str, state: &AppState, token: &str) {
     let Ok(socket) = gloo_net::websocket::futures::WebSocket::open(url) else {
+        // The handshake failed and browsers hide the status, so probe the
+        // token over REST: a 401 logs out (guard bounces to /login) while
+        // a network error keeps the reconnect loop honestly retrying.
+        if let Err(err) = fetch_alerts(token, None, None, 1).await {
+            state.logout_if_unauthorized(&err);
+        }
         return;
     };
     state.ws_status.set(WsStatus::Live);
