@@ -1,12 +1,10 @@
 name: e2e-kind
 
 # End-to-end smoke: builds all images from Dockerfiles, loads them into a
-# fresh kind cluster, applies deploy/, and asserts the operator/API roll out
-# and the operator renders the agent DaemonSet. Runs weekly plus on demand;
-# not on every push (the release-mode container builds take several minutes).
-#
-# Known limits: the sensor's TC attach is NOT asserted (needs BTF on the
-# runner kernel); the agent DaemonSet is checked for existence only.
+# fresh kind cluster, applies deploy/, and asserts the operator/API roll out,
+# the dashboard + /metrics + auth serve, and the sensor attaches TC programs
+# (stock kind nodes ship BTF). Runs weekly plus on demand; not on every push
+# (the release-mode container builds take several minutes).
 on:
   workflow_dispatch:
   schedule:
@@ -133,5 +131,12 @@ jobs:
           curl -sf -H "authorization: Bearer $TOKEN" http://127.0.0.1:3100/api/flows >/dev/null
       - name: Assert operator renders the agent DaemonSet
         run: |
-          # Existence only: the sensor's TC attach needs BTF on the node.
           timeout 180 bash -c 'until kubectl -n mist get daemonset mist-agent >/dev/null 2>&1; do sleep 5; done'
+          kubectl -n mist rollout status daemonset/mist-agent --timeout=180s
+      - name: Assert sensor attaches TC programs
+        run: |
+          # Stock kind nodes ship BTF, so the agent must log a classifier
+          # attach (and keep draining flows) after rollout. Full-log scan:
+          # the attach line scrolls past any tail once drains accumulate.
+          timeout 120 bash -c 'until kubectl -n mist logs daemonset/mist-agent 2>/dev/null | grep -q "attached classifier"; do sleep 5; done'
+          kubectl -n mist logs daemonset/mist-agent --tail=5 | grep -q "drained flows"
