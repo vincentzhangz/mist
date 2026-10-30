@@ -19,6 +19,7 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 argon2 = "0.6"
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 aya = "0.16"
 clap = { version = "4", features = ["derive", "env"] }
@@ -32,6 +33,7 @@ leptos = { version = "0.8", features = ["csr"] }
 leptos_router = "0.8"
 mist-flow = { path = "crates/mist-flow" }
 mist-types = { path = "crates/mist-types" }
+rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",

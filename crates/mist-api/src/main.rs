@@ -618,9 +618,47 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:3000".to_owned())
         .parse()?;
     tracing::info!(%addr, "mist-api listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    if let Some(config) = tls_config().await? {
+        tracing::info!(%addr, "mist-api listening with TLS");
+        axum_server::bind_rustls(addr, config)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await?;
+    } else {
+        tracing::info!(%addr, "mist-api listening (plain HTTP)");
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+/// TLS acceptor when both `TLS_CERT` and `TLS_KEY` point at PEM files;
+/// `None` serves plain HTTP. Exactly one set is a startup error, so a
+/// half-mounted certificate can never silently downgrade to plaintext.
+async fn tls_config() -> anyhow::Result<Option<axum_server::tls_rustls::RustlsConfig>> {
+    let cert = std::env::var("TLS_CERT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let key = std::env::var("TLS_KEY")
+        .ok()
+        .filter(|value| !value.is_empty());
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => {
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("loading TLS cert/key ({cert}, {key}): {error}")
+                })?;
+            Ok(Some(config))
+        }
+        _ => Err(anyhow::anyhow!(
+            "TLS_CERT and TLS_KEY must both be set (or both unset)"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +688,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tls_serves_https_with_a_self_signed_cert() {
+        // Same pin as main: the tree enables two rustls providers.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (state, _rx) = test_state();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+            certified.cert.pem().into_bytes(),
+            certified.signing_key.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        tokio::spawn(
+            axum_server::from_tcp_rustls(std_listener, config)
+                .serve(router(state).into_make_service_with_connect_info::<SocketAddr>()),
+        );
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let body = client
+            .get(format!("https://127.0.0.1:{}/healthz", addr.port()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "ok");
     }
 
     #[tokio::test]
