@@ -1,5 +1,5 @@
 // UI proof: WebKit click-through of the dashboard against kind.
-// login -> flows table -> limit control -> alerts -> logout, no page errors.
+// login -> overview -> flows table -> limit control -> alerts -> logout, no page errors.
 import { webkit } from 'playwright';
 import { spawn } from 'node:child_process';
 
@@ -38,6 +38,17 @@ async function main() {
     await page.click('button[type="submit"]');
     await page.waitForURL('**/', { timeout: 15000 });
     check('login redirects to /', page.url() === `${BASE}/`);
+    await page.waitForSelector('section.overview .stats .stat-value', { timeout: 15000 });
+    const statCount = await page.evaluate(
+      () => document.querySelectorAll('section.overview .stats .stat').length,
+    );
+    check('overview stat cards render', statCount === 4, `cards=${statCount}`);
+    const chartCount = await page.evaluate(
+      () => document.querySelectorAll('section.overview svg.chart').length,
+    );
+    check('overview charts render', chartCount === 3, `charts=${chartCount}`);
+    await page.click('nav a[href="/flows"]');
+    await page.waitForURL('**/flows', { timeout: 15000 });
     await page.waitForSelector('section.flows table', { timeout: 15000 });
     const flowRows = await page.evaluate(
       () => document.querySelectorAll('section.flows table tbody tr').length,
@@ -55,6 +66,21 @@ async function main() {
       () => document.querySelectorAll('section.flows table tbody tr').length,
     );
     check('limit switch reloads without errors', limitedRows >= 0, `rows=${limitedRows}`);
+    await page.fill('section.flows input[type="search"]', 'zzz-no-such-flow');
+    await page.waitForTimeout(500);
+    const noRows = await page.evaluate(
+      () => document.querySelectorAll('section.flows table tbody tr').length,
+    );
+    const noMatch = await page.evaluate(
+      () => document.querySelector('section.flows p.muted')?.textContent ?? '',
+    );
+    check('search filters to empty with hint', noRows === 0 && /No flows match/.test(noMatch), `rows=${noRows}`);
+    await page.fill('section.flows input[type="search"]', '');
+    await page.waitForTimeout(500);
+    const restoredRows = await page.evaluate(
+      () => document.querySelectorAll('section.flows table tbody tr').length,
+    );
+    check('clearing search restores rows', restoredRows > 0, `rows=${restoredRows}`);
     await page.click('nav a[href="/alerts"]');
     await page.waitForURL('**/alerts', { timeout: 15000 });
     await page.waitForSelector('section.alerts ul.alert-list, section.alerts p.muted', { timeout: 15000 });

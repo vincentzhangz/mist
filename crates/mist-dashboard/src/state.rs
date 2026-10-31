@@ -114,6 +114,23 @@ pub fn pod_label(pod: Option<&crate::dto::PodRef>) -> String {
     pod.map_or_else(|| "—".to_owned(), |p| format!("{}/{}", p.namespace, p.name))
 }
 
+/// Format a byte count as `B`/`KB`/`MB`/`GB` with one decimal for units above bytes.
+#[must_use]
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = 1_024 * KB;
+    const GB: u64 = 1_024 * MB;
+    if bytes >= GB {
+        format!("{}.{} GB", bytes / GB, (bytes % GB) * 10 / GB)
+    } else if bytes >= MB {
+        format!("{}.{} MB", bytes / MB, (bytes % MB) * 10 / MB)
+    } else if bytes >= KB {
+        format!("{}.{} KB", bytes / KB, (bytes % KB) * 10 / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +140,17 @@ mod tests {
         // 1700000000s = 2023-11-14T22:13:20Z
         assert_eq!(format_time_ms(1_700_000_000_000), "22:13:20");
         assert_eq!(format_time_ms(0), "00:00:00");
+    }
+
+    #[test]
+    fn bytes_format_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(1_024), "1.0 KB");
+        assert_eq!(format_bytes(1_536), "1.5 KB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
+        assert_eq!(format_bytes(2_684_354_560), "2.5 GB");
     }
 
     #[test]

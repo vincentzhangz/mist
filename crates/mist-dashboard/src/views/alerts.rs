@@ -7,7 +7,7 @@ use crate::dto::{AlertState, AlertView, Severity};
 use crate::state::{AppState, format_time_ms};
 
 /// Severity badge text + CSS class.
-fn severity_badge(severity: Severity) -> (&'static str, &'static str) {
+pub(crate) fn severity_badge(severity: Severity) -> (&'static str, &'static str) {
     match severity {
         Severity::Info => ("info", "sev-info"),
         Severity::Warning => ("warning", "sev-warning"),
@@ -20,6 +20,39 @@ fn state_label(state: AlertState) -> &'static str {
         AlertState::Firing => "firing",
         AlertState::Resolved => "resolved",
     }
+}
+
+/// Whether an alert's display fields contain the (already lowercased) query.
+fn alert_matches(alert: &AlertView, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let labels = alert
+        .labels
+        .iter()
+        .map(|(key, value)| format!("{key} {value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{} {} {} {} {} {labels}",
+        alert.id,
+        alert.title,
+        alert.detail,
+        severity_badge(alert.severity).0,
+        state_label(alert.state),
+    )
+    .to_lowercase()
+    .contains(query)
+}
+
+/// Client-side substring filter over id, title, detail, labels, and badges.
+fn filter_alerts(alerts: &[AlertView], query: &str) -> Vec<AlertView> {
+    let query = query.trim().to_lowercase();
+    alerts
+        .iter()
+        .filter(|alert| alert_matches(alert, &query))
+        .cloned()
+        .collect()
 }
 
 /// Alerts list with severity/state filters and a detail panel.
@@ -35,6 +68,8 @@ pub fn AlertsView() -> impl IntoView {
     let list_error = RwSignal::new(Option::<String>::None);
     let list_loaded = RwSignal::new(false);
     let resolving = RwSignal::new(false);
+    let query = RwSignal::new(String::new());
+    let filtered = Memo::new(move |_| filter_alerts(&state.alerts.get(), &query.get()));
 
     // Refetch the list whenever the token or a filter changes.
     Effect::new(move || {
@@ -92,29 +127,23 @@ pub fn AlertsView() -> impl IntoView {
     view! {
         <section class="alerts">
             <h2>"Alerts"</h2>
-            <AlertFilters severity_filter=severity_filter state_filter=state_filter />
+            <AlertFilters
+                severity_filter=severity_filter
+                state_filter=state_filter
+                query=query
+            />
             <Show when=move || list_error.get().is_some()>
                 <p class="error" aria-live="polite">
                     {move || list_error.get().unwrap_or_default()}
                 </p>
             </Show>
             <div class="alerts-layout">
-                <Show
-                    when=move || !state.alerts.get().is_empty() || !list_loaded.get()
-                    fallback=|| {
-                        view! { <p class="muted">"No alerts match these filters."</p> }
-                    }
-                >
-                    <ul class="alert-list">
-                        <For
-                            each=move || state.alerts.get()
-                            key=|alert| alert.id.clone()
-                            let(alert)
-                        >
-                            <AlertListItem alert=alert selected=selected />
-                        </For>
-                    </ul>
-                </Show>
+                <AlertListColumn
+                    filtered=filtered
+                    alerts=state.alerts
+                    list_loaded=list_loaded
+                    selected=selected
+                />
                 <div class="alert-detail">
                     <AlertDetail
                         detail=detail
@@ -128,11 +157,49 @@ pub fn AlertsView() -> impl IntoView {
     }
 }
 
+/// Alert list column: filtered rows, or a hint distinguishing an empty
+/// result (filters) from a search miss.
+#[component]
+fn AlertListColumn(
+    filtered: Memo<Vec<AlertView>>,
+    alerts: RwSignal<Vec<AlertView>>,
+    list_loaded: RwSignal<bool>,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    view! {
+        <Show
+            when=move || !filtered.get().is_empty() || !list_loaded.get()
+            fallback=move || {
+                view! {
+                    <p class="muted">
+                        {if alerts.get().is_empty() {
+                            "No alerts match these filters."
+                        } else {
+                            "No alerts match this search."
+                        }}
+                    </p>
+                }
+            }
+        >
+            <ul class="alert-list">
+                <For
+                    each=move || filtered.get()
+                    key=|alert| alert.id.clone()
+                    let(alert)
+                >
+                    <AlertListItem alert=alert selected=selected />
+                </For>
+            </ul>
+        </Show>
+    }
+}
+
 /// Severity/state filter selects shared by the list effect.
 #[component]
 fn AlertFilters(
     severity_filter: RwSignal<String>,
     state_filter: RwSignal<String>,
+    query: RwSignal<String>,
 ) -> impl IntoView {
     let severities = ["all", "info", "warning", "critical"];
     let states = ["all", "firing", "resolved"];
@@ -169,6 +236,19 @@ fn AlertFilters(
                         })
                         .collect::<Vec<_>>()}
                 </select>
+            </label>
+            <label>
+                "Search"
+                <input
+                    type="search"
+                    placeholder="Filter alerts…"
+                    spellcheck="false"
+                    autocomplete="off"
+                    on:input=move |ev| {
+                        query.set(event_target_value(&ev));
+                    }
+                    prop:value=move || query.get()
+                />
             </label>
         </div>
     }
@@ -349,5 +429,52 @@ fn AlertBody(
                 </button>
             </Show>
         </article>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn alert(id: &str, title: &str, severity: Severity, state: AlertState) -> AlertView {
+        AlertView {
+            id: id.to_owned(),
+            severity,
+            title: title.to_owned(),
+            detail: "egress exceeds threshold".to_owned(),
+            first_seen_unix_ms: 0,
+            last_seen_unix_ms: 0,
+            labels: BTreeMap::from([("node".to_owned(), "node-1".to_owned())]),
+            explanation: None,
+            state,
+            occurrences: 1,
+        }
+    }
+
+    #[test]
+    fn search_matches_title_id_severity_and_labels() {
+        let alerts = vec![
+            alert(
+                "default/web-0/high-egress",
+                "High egress rate",
+                Severity::Warning,
+                AlertState::Firing,
+            ),
+            alert(
+                "default/db-0/port-scan",
+                "Port scan detected",
+                Severity::Critical,
+                AlertState::Resolved,
+            ),
+        ];
+        assert_eq!(filter_alerts(&alerts, "").len(), 2);
+        assert_eq!(filter_alerts(&alerts, "PORT SCAN").len(), 1);
+        assert_eq!(filter_alerts(&alerts, "web-0/high-egress").len(), 1);
+        assert_eq!(filter_alerts(&alerts, "critical").len(), 1);
+        assert_eq!(filter_alerts(&alerts, "resolved").len(), 1);
+        assert_eq!(filter_alerts(&alerts, "node-1").len(), 2);
+        assert_eq!(filter_alerts(&alerts, "zzz-no-such-alert").len(), 0);
     }
 }

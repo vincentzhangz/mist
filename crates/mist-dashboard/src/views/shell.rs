@@ -121,7 +121,8 @@ pub fn Shell() -> impl IntoView {
                 <header class="topbar">
                     <span class="brand">"mist"</span>
                     <nav>
-                        <A href="/">"Flows"</A>
+                        <A href="/">"Overview"</A>
+                        <A href="/flows">"Flows"</A>
                         <A href="/alerts">"Alerts"</A>
                     </nav>
                     <span class="spacer" />

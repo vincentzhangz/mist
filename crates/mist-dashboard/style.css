@@ -250,6 +250,18 @@ th.num {
   display: flex;
   gap: 12px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.filters input[type="search"] {
+  min-width: 200px;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .filters label {
@@ -271,7 +283,14 @@ th.num {
 }
 
 .table-scroll {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 60vh;
+}
+
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
 }
 
 .alert-list {
@@ -281,6 +300,8 @@ th.num {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 60vh;
+  overflow: auto;
 }
 
 .alert-item {
@@ -356,4 +377,115 @@ th.num {
 
 table.labels {
   max-width: 480px;
+}
+
+/* overview */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 720px) {
+  .stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.overview-grid h3,
+.chart-panel h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.overview-grid {
+  margin-bottom: 20px;
+}
+
+.chart-panel {
+  margin-bottom: 20px;
+}
+
+.chart {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.chart text {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.chart .bar {
+  fill: var(--accent);
+}
+
+.chart .line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.chart .area {
+  fill: var(--accent);
+  opacity: 0.2;
+  stroke: none;
+}
+
+.recent-alerts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recent-alerts li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
 }
