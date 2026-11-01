@@ -127,6 +127,16 @@ Verified against the code — no invented knobs.
 | `INGEST_TOKEN` / `INGEST_TOKENS` | unset → ingest open + loud warning | Accepted agent credentials (single + comma-separated), required as `Bearer` on `/api/ingest` when any is set |
 | `TLS_CERT` / `TLS_KEY` | unset → plain HTTP | PEM certificate + key paths; both set serves HTTPS, exactly one set is a startup error |
 | `SERVE_DIR` | `crates/mist-dashboard/dist` | Dashboard bundle dir; missing `index.html` → API-only mode |
+| `LLM_API_KEY` | unset → explanations disabled | Enables the LLM alert explainer (OpenAI-compatible chat completions), sent as `Bearer` |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | Chat-completions root; setting it alone (no key) also enables, for keyless servers like Ollama |
+| `LLM_MODEL` | `gpt-4o-mini` | Model name sent in chat-completion requests |
+
+When LLM config is present, every fired alert gets one chat-completion call
+(prompt: alert + top 8 flows by bytes, capped at 4000 chars) and the reply is
+stored as the alert's `explanation` (shown as "Why this fired" in the
+dashboard, tagged `explainer=llm`). The explainer is fail-open: timeouts
+(15s), rejections, and malformed replies leave the alert unexplained instead
+of blocking the pipeline, and the key is never logged.
 
 Detector tuning is compiled defaults, not env
 (`DetectorConfig::default`): internal CIDRs `10/8, 172.16/12, 192.168/16,

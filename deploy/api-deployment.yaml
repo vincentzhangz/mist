@@ -54,7 +54,8 @@ spec:
             # required — the pod blocks until the Secret exists, and the API
             # refuses to start without it. The rest are optional keys:
             # absent admin-* fails login closed; absent ingest-token leaves
-            # /api/ingest open (dev only).
+            # /api/ingest open (dev only); absent llm-* disables alert
+            # explanations (explainer=none stub).
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -83,6 +84,24 @@ spec:
                 secretKeyRef:
                   name: mist-api-auth
                   key: ingest-tokens
+                  optional: true
+            - name: LLM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-base-url
+                  optional: true
+            - name: LLM_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-model
+                  optional: true
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-api-key
                   optional: true
             - name: BIND_ADDR
               value: 0.0.0.0:3000

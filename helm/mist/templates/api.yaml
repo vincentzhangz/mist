@@ -85,6 +85,24 @@ spec:
                   name: mist-api-auth
                   key: ingest-tokens
                   optional: true
+            - name: LLM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-base-url
+                  optional: true
+            - name: LLM_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-model
+                  optional: true
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: llm-api-key
+                  optional: true
             - name: BIND_ADDR
               value: 0.0.0.0:3000
             - name: RUST_LOG

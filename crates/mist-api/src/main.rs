@@ -19,6 +19,7 @@
 
 mod analyzer;
 mod auth;
+mod llm;
 mod metrics;
 mod ratelimit;
 mod store;
@@ -586,7 +587,7 @@ async fn main() -> anyhow::Result<()> {
             config: analyzer::DetectorConfig::default(),
             metrics: api_metrics.clone(),
         },
-        analyzer::NoopExplainer,
+        llm::explainer_from_env(),
     ));
 
     // Dashboard SPA: served at / with index.html fallback for client routes.
