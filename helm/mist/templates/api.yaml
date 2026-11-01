@@ -103,6 +103,30 @@ spec:
                   name: mist-api-auth
                   key: llm-api-key
                   optional: true
+            - name: NOTIFY_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: notify-webhook-url
+                  optional: true
+            - name: NOTIFY_WEBHOOK_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: notify-webhook-bearer
+                  optional: true
+            - name: NOTIFY_SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: notify-slack-webhook-url
+                  optional: true
+            - name: NOTIFY_MIN_SEVERITY
+              valueFrom:
+                secretKeyRef:
+                  name: mist-api-auth
+                  key: notify-min-severity
+                  optional: true
             - name: BIND_ADDR
               value: 0.0.0.0:3000
             - name: RUST_LOG

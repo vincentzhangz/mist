@@ -534,8 +534,13 @@ pub struct AnalyzerDeps {
 }
 
 /// Background analyzer task: persist flows, score batches, store + broadcast
-/// alerts, and mirror them to the operator webhook (best-effort).
-pub async fn run_analyzer(deps: AnalyzerDeps, explainer: impl Explainer) {
+/// alerts, mirror them to the operator webhook (best-effort), and fan out
+/// first-fire notifications (best-effort).
+pub async fn run_analyzer(
+    deps: AnalyzerDeps,
+    explainer: impl Explainer,
+    notify: crate::notify::NotifyConfig,
+) {
     let AnalyzerDeps {
         mut rx,
         store,
@@ -573,6 +578,9 @@ pub async fn run_analyzer(deps: AnalyzerDeps, explainer: impl Explainer) {
                         tracing::warn!(?error, url = %url, "operator webhook call failed");
                         metrics.webhook_failed();
                     }
+                    notify
+                        .notify_if_new(&alert, view.occurrences, &metrics)
+                        .await;
                     tracing::info!(id = %view.alert.id, severity = ?view.alert.severity, "alert upserted");
                 }
                 Err(error) => tracing::warn!(?error, id = %alert.id, "alert persistence failed"),

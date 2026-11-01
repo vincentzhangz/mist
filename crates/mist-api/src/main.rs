@@ -21,6 +21,7 @@ mod analyzer;
 mod auth;
 mod llm;
 mod metrics;
+mod notify;
 mod ratelimit;
 mod store;
 
@@ -588,6 +589,7 @@ async fn main() -> anyhow::Result<()> {
             metrics: api_metrics.clone(),
         },
         llm::explainer_from_env(),
+        notify::NotifyConfig::from_env(),
     ));
 
     // Dashboard SPA: served at / with index.html fallback for client routes.

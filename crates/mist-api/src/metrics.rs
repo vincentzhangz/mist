@@ -36,6 +36,8 @@ pub struct Metrics {
     alerts_fired: AtomicU64,
     /// Failed `AnomalyAlert` mirror webhook calls.
     webhook_failures: AtomicU64,
+    /// Failed outbound notification deliveries.
+    notify_failures: AtomicU64,
     /// Login attempts rejected by the rate limiter.
     logins_limited: AtomicU64,
     started_at: Instant,
@@ -51,6 +53,7 @@ impl Default for Metrics {
             persistence_failures: AtomicU64::new(0),
             alerts_fired: AtomicU64::new(0),
             webhook_failures: AtomicU64::new(0),
+            notify_failures: AtomicU64::new(0),
             logins_limited: AtomicU64::new(0),
             started_at: Instant::now(),
         }
@@ -89,6 +92,11 @@ impl Metrics {
     /// Record one failed operator webhook call.
     pub fn webhook_failed(&self) {
         self.webhook_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one failed outbound notification delivery.
+    pub fn notify_failed(&self) {
+        self.notify_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one login attempt rejected by the rate limiter.
@@ -172,6 +180,12 @@ impl Metrics {
         );
         Self::emit_counter(
             &mut out,
+            "mist_api_notify_failures_total",
+            "Failed outbound notification deliveries.",
+            Self::load(&self.notify_failures),
+        );
+        Self::emit_counter(
+            &mut out,
             "mist_api_logins_limited_total",
             "Login attempts rejected by the rate limiter.",
             Self::load(&self.logins_limited),
@@ -223,6 +237,7 @@ mod tests {
         metrics.persistence_failed();
         metrics.alert_fired();
         metrics.webhook_failed();
+        metrics.notify_failed();
         metrics.login_limited();
         let store = StoreCounts {
             flows: 42,
@@ -240,6 +255,7 @@ mod tests {
             "mist_api_persistence_failures_total 1",
             "mist_api_alerts_fired_total 1",
             "mist_api_webhook_failures_total 1",
+            "mist_api_notify_failures_total 1",
             "mist_api_logins_limited_total 1",
             "# TYPE mist_api_flows_stored gauge",
             "mist_api_flows_stored 42",

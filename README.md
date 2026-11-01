@@ -130,6 +130,10 @@ Verified against the code — no invented knobs.
 | `LLM_API_KEY` | unset → explanations disabled | Enables the LLM alert explainer (OpenAI-compatible chat completions), sent as `Bearer` |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Chat-completions root; setting it alone (no key) also enables, for keyless servers like Ollama |
 | `LLM_MODEL` | `gpt-4o-mini` | Model name sent in chat-completion requests |
+| `NOTIFY_WEBHOOK_URL` | unset → no webhook delivery | Generic JSON POST (`{"source":"mist","alert":{...}}`) per newly fired alert |
+| `NOTIFY_WEBHOOK_BEARER` | unset → no auth header | Optional `Bearer` [REDACTED] for the generic webhook |
+| `NOTIFY_SLACK_WEBHOOK_URL` | unset → no Slack delivery | Slack Incoming Webhook URL; posts `[SEVERITY] title` + detail + labels + explanation |
+| `NOTIFY_MIN_SEVERITY` | `info` | Minimum severity delivered (`info`/`warning`/`critical`); unknown values notify on everything |
 
 When LLM config is present, every fired alert gets one chat-completion call
 (prompt: alert + top 8 flows by bytes, capped at 4000 chars) and the reply is
@@ -137,6 +141,10 @@ stored as the alert's `explanation` (shown as "Why this fired" in the
 dashboard, tagged `explainer=llm`). The explainer is fail-open: timeouts
 (15s), rejections, and malformed replies leave the alert unexplained instead
 of blocking the pipeline, and the key is never logged.
+
+Notifications fire exactly once per alert id (first upsert) and are
+fail-open: timeouts (5s) and rejections log a warning and bump
+`mist_api_notify_failures_total` instead of blocking the analyzer.
 
 Detector tuning is compiled defaults, not env
 (`DetectorConfig::default`): internal CIDRs `10/8, 172.16/12, 192.168/16,
