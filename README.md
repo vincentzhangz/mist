@@ -174,9 +174,17 @@ agent ingest token).
 API routes (`crates/mist-api/src/main.rs` `router`): `GET /healthz`,
 `GET /metrics` (public Prometheus scrape), `POST /api/auth/login`,
 `GET /api/flows`, `GET /api/alerts`, `GET /api/alerts/{id}`,
-`POST /api/alerts/{id}/resolve`, `POST /api/ingest`, `GET /api/ws`.
+`POST /api/alerts/{id}/resolve`, `POST /api/alerts/{id}/ack`,
+`GET`/`POST /api/silences`, `DELETE /api/silences/{id}`,
+`POST /api/ingest`, `GET /api/ws`.
 Unknown `/api/*` paths return a JSON 404 (never the dashboard shell).
 Operator webhook: `POST /alerts`.
+
+Alert lifecycle: `firing` → `acknowledged` (ack keeps owner + note, survives
+re-fires) → `resolved`; a re-fire reopens `resolved` back to `firing` and
+drops the old ack. Silence rules (severity / title substring / alert id /
+label matchers + time window) keep matching alerts stored and visible but
+skip their notifications; reads stamp a `silenced` flag on views.
 
 ## Testing
 

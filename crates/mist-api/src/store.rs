@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum AlertLifecycle {
     Firing,
+    Acknowledged,
     Resolved,
 }
 
@@ -21,6 +22,7 @@ impl AlertLifecycle {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "firing" => Some(Self::Firing),
+            "acknowledged" => Some(Self::Acknowledged),
             "resolved" => Some(Self::Resolved),
             _ => None,
         }
@@ -34,6 +36,94 @@ pub struct AlertView {
     pub alert: Alert,
     pub state: AlertLifecycle,
     pub occurrences: u64,
+    /// Who acknowledged the current firing episode, if anyone.
+    pub acked_by: Option<String>,
+    /// Ack note left with `acked_by`, if any.
+    pub ack_note: Option<String>,
+    /// Whether a silence rule currently mutes this alert (no notifications).
+    /// Computed at read time, not stored.
+    pub silenced: bool,
+}
+
+/// A mute rule: matching alerts stay stored and visible but skip
+/// notifications while the window is open. All matchers must match; an
+/// absent matcher matches everything.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Silence {
+    pub id: i64,
+    /// Lowercase severity filter, if set.
+    pub severity: Option<String>,
+    /// Case-insensitive title substring, if set.
+    pub title_contains: Option<String>,
+    /// Exact alert id, if set (mute one alert).
+    pub alert_id: Option<String>,
+    /// Label key; matches presence when `label_value` is `None`.
+    pub label_key: Option<String>,
+    /// Exact label value, if set.
+    pub label_value: Option<String>,
+    pub starts_at_ms: u64,
+    pub ends_at_ms: u64,
+    pub created_by: String,
+    pub comment: String,
+}
+
+/// A rule to create; the store assigns `id`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NewSilence {
+    pub severity: Option<String>,
+    pub title_contains: Option<String>,
+    pub alert_id: Option<String>,
+    pub label_key: Option<String>,
+    pub label_value: Option<String>,
+    pub starts_at_ms: u64,
+    pub ends_at_ms: u64,
+    pub created_by: String,
+    pub comment: String,
+}
+
+/// Wall-clock unix millis. Saturates instead of failing on exotic clocks.
+#[must_use]
+pub(crate) fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis()),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Whether `rule` mutes `alert` at `now_ms`: the window must be open
+/// (`starts_at_ms <= now < ends_at_ms`) and every set matcher must hit.
+#[must_use]
+pub fn silence_matches(rule: &Silence, alert: &Alert, now_ms: u64) -> bool {
+    if now_ms < rule.starts_at_ms || now_ms >= rule.ends_at_ms {
+        return false;
+    }
+    if let Some(severity) = rule.severity.as_deref()
+        && !severity_str(alert.severity).eq_ignore_ascii_case(severity)
+    {
+        return false;
+    }
+    if let Some(query) = rule.title_contains.as_deref()
+        && !alert.title.to_lowercase().contains(&query.to_lowercase())
+    {
+        return false;
+    }
+    if let Some(id) = rule.alert_id.as_deref()
+        && alert.id != id
+    {
+        return false;
+    }
+    if let Some(key) = rule.label_key.as_deref() {
+        let hit = rule.label_value.as_deref().map_or_else(
+            || alert.labels.contains_key(key),
+            |want| alert.labels.get(key).is_some_and(|got| got == want),
+        );
+        if !hit {
+            return false;
+        }
+    }
+    true
 }
 
 /// Filters for flow history queries. All fields optional except the limit.
@@ -71,6 +161,44 @@ impl Store {
         match self {
             Self::Postgres(store) => store.resolve_alert(id).await,
             Self::Memory(store) => store.resolve_alert(id),
+        }
+    }
+
+    /// Acknowledge a firing alert as `by` with `note`. Returns `None` when
+    /// the alert is missing or already resolved.
+    pub async fn ack_alert(
+        &self,
+        id: &str,
+        by: &str,
+        note: &str,
+    ) -> anyhow::Result<Option<AlertView>> {
+        match self {
+            Self::Postgres(store) => store.ack_alert(id, by, note).await,
+            Self::Memory(store) => store.ack_alert(id, by, note),
+        }
+    }
+
+    /// Store a silence rule, pruning expired ones first.
+    pub async fn create_silence(&self, rule: &NewSilence) -> anyhow::Result<Silence> {
+        match self {
+            Self::Postgres(store) => store.create_silence(rule).await,
+            Self::Memory(store) => store.create_silence(rule),
+        }
+    }
+
+    /// All silence rules, earliest expiry first.
+    pub async fn list_silences(&self) -> anyhow::Result<Vec<Silence>> {
+        match self {
+            Self::Postgres(store) => store.list_silences().await,
+            Self::Memory(store) => store.list_silences(),
+        }
+    }
+
+    /// Delete a silence rule. Returns whether one existed.
+    pub async fn delete_silence(&self, id: i64) -> anyhow::Result<bool> {
+        match self {
+            Self::Postgres(store) => store.delete_silence(id).await,
+            Self::Memory(store) => store.delete_silence(id),
         }
     }
 
@@ -227,6 +355,8 @@ impl PgStore {
         // `COALESCE` keeps the stored explanation when a re-fire carries
         // none (e.g. the stub explainer), and refreshes it when the re-fire
         // carries one. Resolve only flips `state`, so it never wipes it.
+        // A re-fire reopens `resolved` alerts to `firing` (dropping the old
+        // ack) but leaves `acknowledged` ones acked.
         let row: AlertRow = sqlx::query_as(
             "INSERT INTO alerts (id, severity, title, detail, first_seen_ms, last_seen_ms, \
              labels, explanation, state, occurrences) \
@@ -239,11 +369,13 @@ impl PgStore {
                last_seen_ms = GREATEST(alerts.last_seen_ms, EXCLUDED.last_seen_ms), \
                labels = EXCLUDED.labels, \
                explanation = COALESCE(EXCLUDED.explanation, alerts.explanation), \
-               state = 'firing', \
+               state = CASE WHEN alerts.state = 'resolved' THEN 'firing' ELSE alerts.state END, \
+               acked_by = CASE WHEN alerts.state = 'resolved' THEN NULL ELSE alerts.acked_by END, \
+               ack_note = CASE WHEN alerts.state = 'resolved' THEN NULL ELSE alerts.ack_note END, \
                occurrences = alerts.occurrences + 1, \
                updated_at = now() \
              RETURNING id, severity, title, detail, first_seen_ms, last_seen_ms, \
-               labels, explanation, state, occurrences",
+               labels, explanation, acked_by, ack_note, state, occurrences",
         )
         .bind(&alert.id)
         .bind(severity_str(alert.severity))
@@ -262,12 +394,73 @@ impl PgStore {
         let row: Option<AlertRow> = sqlx::query_as(
             "UPDATE alerts SET state = 'resolved', updated_at = now() WHERE id = $1 \
              RETURNING id, severity, title, detail, first_seen_ms, last_seen_ms, \
-               labels, explanation, state, occurrences",
+               labels, explanation, acked_by, ack_note, state, occurrences",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(AlertRow::into_view))
+    }
+
+    async fn ack_alert(&self, id: &str, by: &str, note: &str) -> anyhow::Result<Option<AlertView>> {
+        let row: Option<AlertRow> = sqlx::query_as(
+            "UPDATE alerts SET state = 'acknowledged', acked_by = $2, ack_note = $3, \
+             updated_at = now() WHERE id = $1 AND state != 'resolved' \
+             RETURNING id, severity, title, detail, first_seen_ms, last_seen_ms, \
+               labels, explanation, acked_by, ack_note, state, occurrences",
+        )
+        .bind(id)
+        .bind(by)
+        .bind(note)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(AlertRow::into_view))
+    }
+
+    async fn create_silence(&self, rule: &NewSilence) -> anyhow::Result<Silence> {
+        let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+        sqlx::query("DELETE FROM silences WHERE ends_at_ms < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        let row: SilenceRow = sqlx::query_as(
+            "INSERT INTO silences (severity, title_contains, alert_id, label_key, label_value, \
+             starts_at_ms, ends_at_ms, created_by, comment) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             RETURNING id, severity, title_contains, alert_id, label_key, label_value, \
+               starts_at_ms, ends_at_ms, created_by, comment",
+        )
+        .bind(rule.severity.as_deref())
+        .bind(rule.title_contains.as_deref())
+        .bind(rule.alert_id.as_deref())
+        .bind(rule.label_key.as_deref())
+        .bind(rule.label_value.as_deref())
+        .bind(i64::try_from(rule.starts_at_ms).unwrap_or(i64::MAX))
+        .bind(i64::try_from(rule.ends_at_ms).unwrap_or(i64::MAX))
+        .bind(&rule.created_by)
+        .bind(&rule.comment)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.into_silence())
+    }
+
+    async fn list_silences(&self) -> anyhow::Result<Vec<Silence>> {
+        let rows: Vec<SilenceRow> = sqlx::query_as(
+            "SELECT id, severity, title_contains, alert_id, label_key, label_value, \
+             starts_at_ms, ends_at_ms, created_by, comment FROM silences \
+             ORDER BY ends_at_ms ASC LIMIT 500",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(SilenceRow::into_silence).collect())
+    }
+
+    async fn delete_silence(&self, id: i64) -> anyhow::Result<bool> {
+        let done = sqlx::query("DELETE FROM silences WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     async fn list_flows(&self, filter: &FlowFilter) -> anyhow::Result<Vec<FlowRecord>> {
@@ -309,7 +502,7 @@ impl PgStore {
         let rows: Vec<AlertRow> = if let Some(state) = state {
             sqlx::query_as(
                 "SELECT id, severity, title, detail, first_seen_ms, last_seen_ms, \
-                 labels, explanation, state, occurrences FROM alerts \
+                 labels, explanation, acked_by, ack_note, state, occurrences FROM alerts \
                  WHERE state = $1 ORDER BY last_seen_ms DESC LIMIT 500",
             )
             .bind(state)
@@ -318,7 +511,7 @@ impl PgStore {
         } else {
             sqlx::query_as(
                 "SELECT id, severity, title, detail, first_seen_ms, last_seen_ms, \
-                 labels, explanation, state, occurrences FROM alerts \
+                 labels, explanation, acked_by, ack_note, state, occurrences FROM alerts \
                  ORDER BY last_seen_ms DESC LIMIT 500",
             )
             .fetch_all(&self.pool)
@@ -330,7 +523,7 @@ impl PgStore {
     async fn get_alert(&self, id: &str) -> anyhow::Result<Option<AlertView>> {
         let row: Option<AlertRow> = sqlx::query_as(
             "SELECT id, severity, title, detail, first_seen_ms, last_seen_ms, \
-             labels, explanation, state, occurrences FROM alerts WHERE id = $1",
+             labels, explanation, acked_by, ack_note, state, occurrences FROM alerts WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -354,6 +547,7 @@ impl PgStore {
             let count = u64::try_from(count).unwrap_or(0);
             match state.as_str() {
                 "firing" => counts.alerts_firing = count,
+                "acknowledged" => counts.alerts_acknowledged = count,
                 "resolved" => counts.alerts_resolved = count,
                 _ => {}
             }
@@ -443,6 +637,8 @@ struct AlertRow {
     last_seen_ms: i64,
     labels: sqlx::types::Json<HashMap<String, String>>,
     explanation: Option<String>,
+    acked_by: Option<String>,
+    ack_note: Option<String>,
     state: String,
     occurrences: i64,
 }
@@ -466,6 +662,40 @@ impl AlertRow {
             },
             state: AlertLifecycle::parse(&self.state).unwrap_or(AlertLifecycle::Firing),
             occurrences: u64::try_from(self.occurrences).unwrap_or(0),
+            acked_by: self.acked_by,
+            ack_note: self.ack_note,
+            silenced: false,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SilenceRow {
+    id: i64,
+    severity: Option<String>,
+    title_contains: Option<String>,
+    alert_id: Option<String>,
+    label_key: Option<String>,
+    label_value: Option<String>,
+    starts_at_ms: i64,
+    ends_at_ms: i64,
+    created_by: String,
+    comment: String,
+}
+
+impl SilenceRow {
+    fn into_silence(self) -> Silence {
+        Silence {
+            id: self.id,
+            severity: self.severity,
+            title_contains: self.title_contains,
+            alert_id: self.alert_id,
+            label_key: self.label_key,
+            label_value: self.label_value,
+            starts_at_ms: u64::try_from(self.starts_at_ms).unwrap_or(0),
+            ends_at_ms: u64::try_from(self.ends_at_ms).unwrap_or(0),
+            created_by: self.created_by,
+            comment: self.comment,
         }
     }
 }
@@ -498,12 +728,29 @@ struct MemState {
     flows: Vec<FlowRecord>,
     alerts: HashMap<String, StoredAlert>,
     users: HashMap<String, String>,
+    silences: HashMap<i64, Silence>,
+    next_silence_id: i64,
 }
 
 struct StoredAlert {
     alert: Alert,
     state: AlertLifecycle,
     occurrences: u64,
+    acked_by: Option<String>,
+    ack_note: Option<String>,
+}
+
+impl StoredAlert {
+    fn view(&self) -> AlertView {
+        AlertView {
+            alert: self.alert.clone(),
+            state: self.state,
+            occurrences: self.occurrences,
+            acked_by: self.acked_by.clone(),
+            ack_note: self.ack_note.clone(),
+            silenced: false,
+        }
+    }
 }
 
 impl MemStore {
@@ -530,6 +777,8 @@ impl MemStore {
                 alert: alert.clone(),
                 state: AlertLifecycle::Firing,
                 occurrences: 0,
+                acked_by: None,
+                ack_note: None,
             });
         // A re-fire without an explanation (e.g. the stub explainer) keeps
         // the stored one; a re-fire carrying one refreshes it.
@@ -545,13 +794,15 @@ impl MemStore {
             .min(alert.first_seen_unix_ms);
         stored.alert.last_seen_unix_ms =
             stored.alert.last_seen_unix_ms.max(alert.last_seen_unix_ms);
-        stored.state = AlertLifecycle::Firing;
+        // A re-fire reopens `resolved` alerts (dropping the old ack) but
+        // leaves `acknowledged` ones acked.
+        if stored.state == AlertLifecycle::Resolved {
+            stored.state = AlertLifecycle::Firing;
+            stored.acked_by = None;
+            stored.ack_note = None;
+        }
         stored.occurrences = stored.occurrences.saturating_add(1);
-        Ok(AlertView {
-            alert: stored.alert.clone(),
-            state: stored.state,
-            occurrences: stored.occurrences,
-        })
+        Ok(stored.view())
     }
 
     fn resolve_alert(&self, id: &str) -> anyhow::Result<Option<AlertView>> {
@@ -561,12 +812,67 @@ impl MemStore {
             .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
         Ok(state.alerts.get_mut(id).map(|stored| {
             stored.state = AlertLifecycle::Resolved;
-            AlertView {
-                alert: stored.alert.clone(),
-                state: stored.state,
-                occurrences: stored.occurrences,
-            }
+            stored.view()
         }))
+    }
+
+    fn ack_alert(&self, id: &str, by: &str, note: &str) -> anyhow::Result<Option<AlertView>> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
+        Ok(state.alerts.get_mut(id).and_then(|stored| {
+            if stored.state == AlertLifecycle::Resolved {
+                return None;
+            }
+            stored.state = AlertLifecycle::Acknowledged;
+            stored.acked_by = Some(by.to_owned());
+            stored.ack_note = Some(note.to_owned());
+            Some(stored.view())
+        }))
+    }
+
+    fn create_silence(&self, rule: &NewSilence) -> anyhow::Result<Silence> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
+        let now = now_ms();
+        state.silences.retain(|_, rule| rule.ends_at_ms >= now);
+        state.next_silence_id = state.next_silence_id.saturating_add(1);
+        let silence = Silence {
+            id: state.next_silence_id,
+            severity: rule.severity.clone(),
+            title_contains: rule.title_contains.clone(),
+            alert_id: rule.alert_id.clone(),
+            label_key: rule.label_key.clone(),
+            label_value: rule.label_value.clone(),
+            starts_at_ms: rule.starts_at_ms,
+            ends_at_ms: rule.ends_at_ms,
+            created_by: rule.created_by.clone(),
+            comment: rule.comment.clone(),
+        };
+        state.silences.insert(silence.id, silence.clone());
+        Ok(silence)
+    }
+
+    fn list_silences(&self) -> anyhow::Result<Vec<Silence>> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
+        let mut rules: Vec<Silence> = state.silences.values().cloned().collect();
+        rules.sort_by_key(|rule| rule.ends_at_ms);
+        rules.truncate(500);
+        Ok(rules)
+    }
+
+    fn delete_silence(&self, id: i64) -> anyhow::Result<bool> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
+        Ok(state.silences.remove(&id).is_some())
     }
 
     fn list_flows(&self, filter: &FlowFilter) -> anyhow::Result<Vec<FlowRecord>> {
@@ -618,11 +924,7 @@ impl MemStore {
             .alerts
             .values()
             .filter(|stored| wanted.is_none_or(|lifecycle| stored.state == lifecycle))
-            .map(|stored| AlertView {
-                alert: stored.alert.clone(),
-                state: stored.state,
-                occurrences: stored.occurrences,
-            })
+            .map(StoredAlert::view)
             .collect();
         alerts.sort_by_key(|view| std::cmp::Reverse(view.alert.last_seen_unix_ms));
         alerts.truncate(500);
@@ -634,11 +936,7 @@ impl MemStore {
             .inner
             .read()
             .map_err(|_| anyhow::anyhow!("mem store lock poisoned"))?;
-        Ok(state.alerts.get(id).map(|stored| AlertView {
-            alert: stored.alert.clone(),
-            state: stored.state,
-            occurrences: stored.occurrences,
-        }))
+        Ok(state.alerts.get(id).map(StoredAlert::view))
     }
 
     fn counts(&self) -> anyhow::Result<crate::metrics::StoreCounts> {
@@ -654,6 +952,9 @@ impl MemStore {
             match stored.state {
                 AlertLifecycle::Firing => {
                     counts.alerts_firing = counts.alerts_firing.saturating_add(1);
+                }
+                AlertLifecycle::Acknowledged => {
+                    counts.alerts_acknowledged = counts.alerts_acknowledged.saturating_add(1);
                 }
                 AlertLifecycle::Resolved => {
                     counts.alerts_resolved = counts.alerts_resolved.saturating_add(1);
@@ -817,5 +1118,140 @@ mod tests {
             refreshed.alert.explanation.as_deref(),
             Some("confirmed exfiltration pattern")
         );
+    }
+
+    fn silence() -> Silence {
+        Silence {
+            id: 0,
+            severity: None,
+            title_contains: None,
+            alert_id: None,
+            label_key: None,
+            label_value: None,
+            starts_at_ms: 1_000,
+            ends_at_ms: 2_000,
+            created_by: "tester@example.com".to_owned(),
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn silence_window_is_half_open() {
+        let rule = silence();
+        let alert = alert();
+        assert!(!silence_matches(&rule, &alert, 999));
+        assert!(silence_matches(&rule, &alert, 1_000));
+        assert!(silence_matches(&rule, &alert, 1_999));
+        assert!(!silence_matches(&rule, &alert, 2_000));
+    }
+
+    #[test]
+    fn silence_matchers_all_must_hit() {
+        let mut alert = alert();
+        alert.title = "Port scan of node-1".to_owned();
+        alert.labels.insert("node".to_owned(), "node-1".to_owned());
+        let mut rule = silence();
+        // No matchers: mutes everything in the window.
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.severity = Some("warning".to_owned());
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.severity = Some("critical".to_owned());
+        assert!(!silence_matches(&rule, &alert, 1_500));
+        rule.severity = None;
+        rule.title_contains = Some("PORT SCAN".to_owned());
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.title_contains = Some("egress".to_owned());
+        assert!(!silence_matches(&rule, &alert, 1_500));
+        rule.title_contains = None;
+        rule.alert_id = Some("scan:10.0.1.4".to_owned());
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.alert_id = Some("other".to_owned());
+        assert!(!silence_matches(&rule, &alert, 1_500));
+        rule.alert_id = None;
+        rule.label_key = Some("node".to_owned());
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.label_value = Some("node-1".to_owned());
+        assert!(silence_matches(&rule, &alert, 1_500));
+        rule.label_value = Some("node-9".to_owned());
+        assert!(!silence_matches(&rule, &alert, 1_500));
+        rule.label_key = Some("missing".to_owned());
+        rule.label_value = None;
+        assert!(!silence_matches(&rule, &alert, 1_500));
+    }
+
+    fn new_silence(ends_at_ms: u64) -> NewSilence {
+        NewSilence {
+            severity: None,
+            title_contains: None,
+            alert_id: None,
+            label_key: None,
+            label_value: None,
+            starts_at_ms: 0,
+            ends_at_ms,
+            created_by: "tester@example.com".to_owned(),
+            comment: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mem_ack_survives_refire_and_clears_on_reopen() {
+        let store = Store::Memory(MemStore::default());
+        let fired = store.upsert_alert(&alert()).await.unwrap();
+        assert_eq!(fired.state, AlertLifecycle::Firing);
+        assert_eq!(fired.acked_by, None);
+        let acked = store
+            .ack_alert(&alert().id, "oncall@example.com", "looking")
+            .await
+            .unwrap()
+            .expect("ack must apply");
+        assert_eq!(acked.state, AlertLifecycle::Acknowledged);
+        assert_eq!(acked.acked_by.as_deref(), Some("oncall@example.com"));
+        assert_eq!(acked.ack_note.as_deref(), Some("looking"));
+        // A re-fire keeps the ack.
+        let refired = store.upsert_alert(&alert()).await.unwrap();
+        assert_eq!(refired.state, AlertLifecycle::Acknowledged);
+        assert_eq!(refired.acked_by.as_deref(), Some("oncall@example.com"));
+        // Resolve, then re-fire: reopened fresh, ack dropped.
+        store.resolve_alert(&alert().id).await.unwrap();
+        let reopened = store.upsert_alert(&alert()).await.unwrap();
+        assert_eq!(reopened.state, AlertLifecycle::Firing);
+        assert_eq!(reopened.acked_by, None);
+        // Acking a resolved alert is a no-op.
+        store.resolve_alert(&alert().id).await.unwrap();
+        assert!(
+            store
+                .ack_alert(&alert().id, "x", "")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.ack_alert("missing", "x", "").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mem_silences_crud_and_prune_expired() {
+        let store = Store::Memory(MemStore::default());
+        let first = store.create_silence(&new_silence(u64::MAX)).await.unwrap();
+        assert_eq!(first.id, 1);
+        let second = store
+            .create_silence(&new_silence(u64::MAX - 1))
+            .await
+            .unwrap();
+        assert_eq!(second.id, 2);
+        let rules = store.list_silences().await.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].ends_at_ms <= rules[1].ends_at_ms);
+        assert!(store.delete_silence(first.id).await.unwrap());
+        assert!(!store.delete_silence(first.id).await.unwrap());
+        assert_eq!(store.list_silences().await.unwrap().len(), 1);
+        // Creating a live rule prunes the expired one.
+        let expired = NewSilence {
+            ends_at_ms: 1,
+            ..new_silence(u64::MAX)
+        };
+        let created = store.create_silence(&expired).await.unwrap();
+        let _ = store.create_silence(&new_silence(u64::MAX)).await.unwrap();
+        let rules = store.list_silences().await.unwrap();
+        assert!(rules.iter().all(|rule| rule.id != created.id));
     }
 }

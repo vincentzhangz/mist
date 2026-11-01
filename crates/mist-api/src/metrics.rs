@@ -14,6 +14,8 @@ pub struct StoreCounts {
     pub flows: u64,
     /// Alerts in `firing` state.
     pub alerts_firing: u64,
+    /// Alerts in `acknowledged` state.
+    pub alerts_acknowledged: u64,
     /// Alerts in `resolved` state.
     pub alerts_resolved: u64,
 }
@@ -38,6 +40,8 @@ pub struct Metrics {
     webhook_failures: AtomicU64,
     /// Failed outbound notification deliveries.
     notify_failures: AtomicU64,
+    /// First-fire notifications skipped by silence rules.
+    notifications_suppressed: AtomicU64,
     /// Login attempts rejected by the rate limiter.
     logins_limited: AtomicU64,
     started_at: Instant,
@@ -54,6 +58,7 @@ impl Default for Metrics {
             alerts_fired: AtomicU64::new(0),
             webhook_failures: AtomicU64::new(0),
             notify_failures: AtomicU64::new(0),
+            notifications_suppressed: AtomicU64::new(0),
             logins_limited: AtomicU64::new(0),
             started_at: Instant::now(),
         }
@@ -97,6 +102,12 @@ impl Metrics {
     /// Record one failed outbound notification delivery.
     pub fn notify_failed(&self) {
         self.notify_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one first-fire notification skipped by a silence rule.
+    pub fn notification_suppressed(&self) {
+        self.notifications_suppressed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one login attempt rejected by the rate limiter.
@@ -186,6 +197,12 @@ impl Metrics {
         );
         Self::emit_counter(
             &mut out,
+            "mist_api_notifications_suppressed_total",
+            "First-fire notifications skipped by silence rules.",
+            Self::load(&self.notifications_suppressed),
+        );
+        Self::emit_counter(
+            &mut out,
             "mist_api_logins_limited_total",
             "Login attempts rejected by the rate limiter.",
             Self::load(&self.logins_limited),
@@ -201,6 +218,12 @@ impl Metrics {
             "mist_api_alerts_firing",
             "Alerts currently firing.",
             store.alerts_firing,
+        );
+        Self::emit_gauge(
+            &mut out,
+            "mist_api_alerts_acknowledged",
+            "Alerts currently acknowledged.",
+            store.alerts_acknowledged,
         );
         Self::emit_gauge(
             &mut out,
@@ -238,10 +261,12 @@ mod tests {
         metrics.alert_fired();
         metrics.webhook_failed();
         metrics.notify_failed();
+        metrics.notification_suppressed();
         metrics.login_limited();
         let store = StoreCounts {
             flows: 42,
             alerts_firing: 2,
+            alerts_acknowledged: 1,
             alerts_resolved: 5,
         };
         let body = metrics.render(&store);
@@ -256,10 +281,12 @@ mod tests {
             "mist_api_alerts_fired_total 1",
             "mist_api_webhook_failures_total 1",
             "mist_api_notify_failures_total 1",
+            "mist_api_notifications_suppressed_total 1",
             "mist_api_logins_limited_total 1",
             "# TYPE mist_api_flows_stored gauge",
             "mist_api_flows_stored 42",
             "mist_api_alerts_firing 2",
+            "mist_api_alerts_acknowledged 1",
             "mist_api_alerts_resolved 5",
             "mist_api_uptime_seconds ",
             "mist_api_build_info{version=\"",

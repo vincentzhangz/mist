@@ -91,6 +91,7 @@ pub enum Severity {
 #[serde(rename_all = "lowercase")]
 pub enum AlertState {
     Firing,
+    Acknowledged,
     Resolved,
 }
 
@@ -109,6 +110,57 @@ pub struct AlertView {
     pub explanation: Option<String>,
     pub state: AlertState,
     pub occurrences: u64,
+    /// Ack attribution; absent on older payloads.
+    #[serde(default)]
+    pub acked_by: Option<String>,
+    #[serde(default)]
+    pub ack_note: Option<String>,
+    /// Absent on older payloads; unknown means "not silenced".
+    #[serde(default)]
+    pub silenced: bool,
+}
+
+/// A silence rule as returned by `GET /api/silences`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Silence {
+    pub id: i64,
+    pub severity: Option<String>,
+    pub title_contains: Option<String>,
+    pub alert_id: Option<String>,
+    pub label_key: Option<String>,
+    pub label_value: Option<String>,
+    pub starts_at_ms: u64,
+    pub ends_at_ms: u64,
+    pub created_by: String,
+    pub comment: String,
+}
+
+/// Body sent to `POST /api/silences`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewSilenceRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_contains: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starts_at_ms: Option<u64>,
+    pub ends_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Body sent to `POST /api/alerts/{id}/ack`. The owner defaults
+/// server-side to the logged-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Body sent to `POST /api/auth/login`.
@@ -260,6 +312,57 @@ mod tests {
         let json = ALERT_JSON.replace(r#""explanation": "Likely backup traffic.","#, "");
         let alert: AlertView = serde_json::from_str(&json).expect("missing explanation must parse");
         assert_eq!(alert.explanation, None);
+    }
+
+    #[test]
+    fn alert_with_ack_and_silenced() {
+        let json = ALERT_JSON
+            .replace(r#""state": "firing""#, r#""state": "acknowledged""#)
+            .replace(
+                r#""occurrences": 3"#,
+                r#""occurrences": 3,"acked_by":"oncall@example.com","ack_note":"looking","silenced":true"#,
+            );
+        let alert: AlertView = serde_json::from_str(&json).expect("must parse");
+        assert_eq!(alert.state, AlertState::Acknowledged);
+        assert_eq!(alert.acked_by.as_deref(), Some("oncall@example.com"));
+        assert!(alert.silenced);
+        // Old payloads without the keys still parse with quiet defaults.
+        let legacy: AlertView = serde_json::from_str(ALERT_JSON).expect("legacy must parse");
+        assert_eq!(legacy.acked_by, None);
+        assert!(!legacy.silenced);
+    }
+
+    #[test]
+    fn silence_shapes() {
+        let rule: Silence = serde_json::from_str(
+            r#"{"id":7,"severity":"critical","title_contains":null,"alert_id":"a/b/c",
+                "label_key":"node","label_value":"node-1","starts_at_ms":0,
+                "ends_at_ms":1,"created_by":"o@example.com","comment":""}"#,
+        )
+        .expect("silence must parse");
+        assert_eq!(rule.id, 7);
+        assert_eq!(rule.label_value.as_deref(), Some("node-1"));
+        let body = NewSilenceRequest {
+            severity: None,
+            title_contains: None,
+            alert_id: Some("a/b/c".to_owned()),
+            label_key: None,
+            label_value: None,
+            starts_at_ms: None,
+            ends_at_ms: 99,
+            comment: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&body).expect("must serialize"),
+            serde_json::json!({"alert_id": "a/b/c", "ends_at_ms": 99})
+        );
+        let ack = AckRequest {
+            note: Some("on it".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_value(&ack).expect("must serialize"),
+            serde_json::json!({"note": "on it"})
+        );
     }
 
     #[test]

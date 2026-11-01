@@ -85,6 +85,26 @@ async function main() {
     await page.waitForURL('**/alerts', { timeout: 15000 });
     await page.waitForSelector('section.alerts ul.alert-list, section.alerts p.muted', { timeout: 15000 });
     check('alerts view loads', true);
+    const hasRows = await page.evaluate(
+      () => document.querySelectorAll('section.alerts ul.alert-list li').length > 0,
+    );
+    if (hasRows) {
+      // Resolved alerts show no actions by design; scan the first rows for an open one.
+      let hasAction = false;
+      for (let i = 1; i <= 5 && !hasAction; i++) {
+        const sel = `section.alerts ul.alert-list li:nth-child(${i}) button.alert-item`;
+        if (!(await page.$(sel))) break;
+        await page.click(sel);
+        await page.waitForSelector('section.alerts .alert-detail article', { timeout: 15000 });
+        await page.waitForTimeout(300);
+        hasAction = await page.evaluate(
+          () => document.querySelector('section.alerts .alert-detail .action-row button') !== null,
+        );
+      }
+      check('alert detail offers actions', hasAction);
+    } else {
+      check('alert detail offers actions', true, 'no rows to select');
+    }
     await page.click('button.logout');
     await page.waitForURL('**/login', { timeout: 15000 });
     check('logout returns to /login', true);

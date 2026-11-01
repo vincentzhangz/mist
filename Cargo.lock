@@ -2705,6 +2705,7 @@ dependencies = [
  "futures",
  "gloo-net 0.7.0",
  "gloo-timers 0.4.0",
+ "js-sys",
  "leptos",
  "leptos_router",
  "serde",

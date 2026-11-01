@@ -7,7 +7,10 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use gloo_net::http::Request;
 
-use crate::dto::{AlertView, ErrorBody, FlowRecord, LoginRequest, LoginResponse};
+use crate::dto::{
+    AckRequest, AlertView, ErrorBody, FlowRecord, LoginRequest, LoginResponse, NewSilenceRequest,
+    Silence,
+};
 
 /// Error from an API call, carrying a human-readable message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +193,90 @@ pub async fn resolve_alert(token: &str, id: &str) -> Result<AlertView, ApiError>
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?,
     )
+}
+
+/// Acknowledge one alert with an optional note. The owner defaults
+/// server-side to the logged-in user.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the response is unexpected.
+pub async fn ack_alert(token: &str, id: &str, note: Option<String>) -> Result<AlertView, ApiError> {
+    let path = format!("{}/ack", alert_path(id));
+    let body = AckRequest { note };
+    let request = Request::post(&path)
+        .header("Authorization", &auth_value(token))
+        .json(&body)
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    parse_or_status(
+        response.status(),
+        &response
+            .text()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?,
+    )
+}
+
+/// Fetch all silence rules.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the response is unexpected.
+pub async fn fetch_silences(token: &str) -> Result<Vec<Silence>, ApiError> {
+    let text = get_authed("/api/silences", token).await?;
+    serde_json::from_str::<Vec<Silence>>(&text)
+        .map_err(|e| ApiError::Decode(format!("invalid silences response: {e}")))
+}
+
+/// Create a silence rule.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the response is unexpected.
+pub async fn create_silence(token: &str, rule: &NewSilenceRequest) -> Result<Silence, ApiError> {
+    let request = Request::post("/api/silences")
+        .header("Authorization", &auth_value(token))
+        .json(rule)
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    parse_or_status(
+        response.status(),
+        &response
+            .text()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?,
+    )
+}
+
+/// Delete a silence rule. The API answers 204 with no body.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the rule is missing.
+pub async fn delete_silence(token: &str, id: i64) -> Result<(), ApiError> {
+    let path = format!("/api/silences/{id}");
+    let response = Request::delete(&path)
+        .header("Authorization", &auth_value(token))
+        .send()
+        .await
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| ApiError::Network(e.to_string()))?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(status_error(status, &text))
+    }
 }
 
 /// Build the websocket URL for the current page (`ws:`/`wss:` + same host).

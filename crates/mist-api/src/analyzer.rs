@@ -26,7 +26,7 @@ use crate::store::{AlertView, Store};
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AlertEvent {
     Flows { flows: Vec<FlowRecord> },
-    Alert { alert: AlertView },
+    Alert { alert: Box<AlertView> },
 }
 
 /// Detector tuning. All fields have sane defaults; the API server overrides
@@ -569,8 +569,18 @@ pub async fn run_analyzer(
             match store.upsert_alert(&alert).await {
                 Ok(view) => {
                     metrics.alert_fired();
+                    let mut view = view;
+                    let now = crate::store::now_ms();
+                    match store.list_silences().await {
+                        Ok(rules) => {
+                            view.silenced = rules
+                                .iter()
+                                .any(|rule| crate::store::silence_matches(rule, &view.alert, now));
+                        }
+                        Err(error) => tracing::warn!(?error, "silence lookup failed"),
+                    }
                     let _ = alerts_tx.send(AlertEvent::Alert {
-                        alert: view.clone(),
+                        alert: Box::new(view.clone()),
                     });
                     if let Some(url) = &webhook_url
                         && let Err(error) = http.post(url).json(&alert).send().await
@@ -578,9 +588,13 @@ pub async fn run_analyzer(
                         tracing::warn!(?error, url = %url, "operator webhook call failed");
                         metrics.webhook_failed();
                     }
-                    notify
-                        .notify_if_new(&alert, view.occurrences, &metrics)
-                        .await;
+                    if view.silenced {
+                        metrics.notification_suppressed();
+                    } else {
+                        notify
+                            .notify_if_new(&alert, view.occurrences, &metrics)
+                            .await;
+                    }
                     tracing::info!(id = %view.alert.id, severity = ?view.alert.severity, "alert upserted");
                 }
                 Err(error) => tracing::warn!(?error, id = %alert.id, "alert persistence failed"),

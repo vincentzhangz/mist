@@ -34,15 +34,15 @@ use analyzer::AlertEvent;
 use axum::{
     Router,
     body::Body,
-    extract::{ConnectInfo, FromRequestParts, Path, Query, State, WebSocketUpgrade},
+    extract::{ConnectInfo, Extension, FromRequestParts, Path, Query, State, WebSocketUpgrade},
     http::{Request, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Json},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use mist_types::{FlowBatch, FlowRecord};
 use serde::{Deserialize, Serialize};
-use store::{AlertView, FlowFilter, MemStore, PgStore, Store};
+use store::{AlertView, FlowFilter, MemStore, NewSilence, PgStore, Silence, Store};
 use tokio::sync::{broadcast, mpsc};
 use tower_http::{
     cors::CorsLayer,
@@ -76,6 +76,8 @@ enum AppError {
     Store(#[from] anyhow::Error),
     #[error("not found")]
     NotFound,
+    #[error("bad request: {0}")]
+    BadRequest(String),
     #[error("ingest saturated; retry later")]
     Saturated,
 }
@@ -85,6 +87,7 @@ impl IntoResponse for AppError {
         let status = match &self {
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Saturated => StatusCode::SERVICE_UNAVAILABLE,
         };
         (
@@ -129,6 +132,28 @@ async fn list_flows(
     Ok(Json(state.inner.store.list_flows(&filter).await?))
 }
 
+/// Stamp `silenced` on views from the current silence rules. A rules
+/// lookup failure leaves views unmarked (fail-open) instead of failing
+/// the read.
+async fn mark_silenced(store: &Store, views: &mut [AlertView]) {
+    if views.is_empty() {
+        return;
+    }
+    let rules = match store.list_silences().await {
+        Ok(rules) => rules,
+        Err(error) => {
+            tracing::warn!(?error, "silence lookup failed");
+            return;
+        }
+    };
+    let now = store::now_ms();
+    for view in views {
+        view.silenced = rules
+            .iter()
+            .any(|rule| store::silence_matches(rule, &view.alert, now));
+    }
+}
+
 async fn list_alerts(
     State(state): State<AppState>,
     Query(query): Query<AlertQuery>,
@@ -142,6 +167,7 @@ async fn list_alerts(
         alerts.retain(|view| format!("{:?}", view.alert.severity).eq_ignore_ascii_case(&severity));
     }
     alerts.truncate(query.limit.unwrap_or(500));
+    mark_silenced(&state.inner.store, &mut alerts).await;
     Ok(Json(alerts))
 }
 
@@ -149,26 +175,116 @@ async fn get_alert(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<AlertView>, AppError> {
-    state
+    let mut view = state
         .inner
         .store
         .get_alert(&id)
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    mark_silenced(&state.inner.store, std::slice::from_mut(&mut view)).await;
+    Ok(Json(view))
 }
 
 async fn resolve_alert(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<AlertView>, AppError> {
-    state
+    let mut view = state
         .inner
         .store
         .resolve_alert(&id)
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    mark_silenced(&state.inner.store, std::slice::from_mut(&mut view)).await;
+    Ok(Json(view))
+}
+
+#[derive(Debug, Deserialize)]
+struct AckRequest {
+    note: Option<String>,
+}
+
+async fn ack_alert(
+    State(state): State<AppState>,
+    Extension(authed): Extension<AuthedEmail>,
+    Path(id): Path<String>,
+    Json(request): Json<AckRequest>,
+) -> Result<Json<AlertView>, AppError> {
+    let note = request.note.unwrap_or_default();
+    let mut view = state
+        .inner
+        .store
+        .ack_alert(&id, &authed.0, &note)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    mark_silenced(&state.inner.store, std::slice::from_mut(&mut view)).await;
+    Ok(Json(view))
+}
+
+async fn list_silences(State(state): State<AppState>) -> Result<Json<Vec<Silence>>, AppError> {
+    Ok(Json(state.inner.store.list_silences().await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSilenceRequest {
+    severity: Option<String>,
+    title_contains: Option<String>,
+    alert_id: Option<String>,
+    label_key: Option<String>,
+    label_value: Option<String>,
+    starts_at_ms: Option<u64>,
+    ends_at_ms: u64,
+    comment: Option<String>,
+}
+
+async fn create_silence(
+    State(state): State<AppState>,
+    Extension(authed): Extension<AuthedEmail>,
+    Json(request): Json<CreateSilenceRequest>,
+) -> Result<Json<Silence>, AppError> {
+    let severity = request
+        .severity
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = &severity
+        && !["info", "warning", "critical"].contains(&value.as_str())
+    {
+        return Err(AppError::BadRequest(format!("unknown severity: {value}")));
+    }
+    let starts_at_ms = request.starts_at_ms.unwrap_or_else(store::now_ms);
+    if request.ends_at_ms <= starts_at_ms {
+        return Err(AppError::BadRequest(
+            "ends_at_ms must be after starts_at_ms".to_owned(),
+        ));
+    }
+    let clean = |value: Option<String>| {
+        value
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+    };
+    let rule = NewSilence {
+        severity,
+        title_contains: clean(request.title_contains),
+        alert_id: clean(request.alert_id),
+        label_key: clean(request.label_key),
+        label_value: clean(request.label_value),
+        starts_at_ms,
+        ends_at_ms: request.ends_at_ms,
+        created_by: authed.0,
+        comment: request.comment.unwrap_or_default().trim().to_owned(),
+    };
+    Ok(Json(state.inner.store.create_silence(&rule).await?))
+}
+
+async fn delete_silence(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    if state.inner.store.delete_silence(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
 }
 
 async fn ingest(
@@ -325,7 +441,7 @@ fn bearer_token(req: &Request<Body>) -> Option<&str> {
 /// Everything else under `/api/` requires `Authorization: Bearer <jwt>`.
 async fn require_auth(
     State(state): State<AppState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
     let unauthorized = || {
@@ -347,14 +463,18 @@ async fn require_auth(
         }
         return unauthorized();
     }
-    let authorized = bearer_token(&req)
-        .and_then(|token| auth::verify_token(token, &state.inner.jwt_secret))
-        .is_some();
-    if !authorized {
+    let Some(email) =
+        bearer_token(&req).and_then(|token| auth::verify_token(token, &state.inner.jwt_secret))
+    else {
         return unauthorized();
-    }
+    };
+    req.extensions_mut().insert(AuthedEmail(email));
     next.run(req).await
 }
+
+/// Email from the verified JWT, inserted by [`require_auth`].
+#[derive(Clone, Debug)]
+struct AuthedEmail(String);
 
 #[derive(Debug, Default, Deserialize)]
 struct WsQuery {
@@ -461,6 +581,9 @@ fn router(state: AppState) -> Router {
         .route("/api/alerts", get(list_alerts))
         .route("/api/alerts/{id}", get(get_alert))
         .route("/api/alerts/{id}/resolve", post(resolve_alert))
+        .route("/api/alerts/{id}/ack", post(ack_alert))
+        .route("/api/silences", get(list_silences).post(create_silence))
+        .route("/api/silences/{id}", delete(delete_silence))
         .route("/api/ingest", post(ingest))
         .route("/api/ws", get(ws_handler));
     let app = if state.inner.spa.is_some() {
@@ -914,6 +1037,168 @@ mod tests {
         assert_eq!(body_json(resolved).await["state"], "resolved");
     }
 
+    #[tokio::test]
+    async fn ack_roundtrip_through_rest() {
+        let (state, _rx) = test_state();
+        let alert = mist_types::Alert {
+            id: "scan:1.2.3.4".to_owned(),
+            severity: mist_types::Severity::Warning,
+            title: "scan".to_owned(),
+            detail: "detail".to_owned(),
+            first_seen_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            labels: HashMap::default(),
+            explanation: None,
+        };
+        state.inner.store.upsert_alert(&alert).await.unwrap();
+
+        let app = || router(state.clone());
+        let token = auth::create_token("acker@example.com", &state.inner.jwt_secret).unwrap();
+        let bearer = format!("Bearer {token}");
+        let body_json = async |response: axum::response::Response| {
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        let ack = |uri: &str, note: &str| {
+            app().oneshot(
+                Request::post(uri)
+                    .header("authorization", bearer.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"note":"{note}"}}"#)))
+                    .unwrap(),
+            )
+        };
+        let acked = ack("/api/alerts/scan:1.2.3.4/ack", "on it").await.unwrap();
+        assert_eq!(acked.status(), StatusCode::OK);
+        let body = body_json(acked).await;
+        assert_eq!(body["state"], "acknowledged");
+        assert_eq!(body["acked_by"], "acker@example.com");
+        assert_eq!(body["ack_note"], "on it");
+
+        let missing = ack("/api/alerts/nope/ack", "").await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // Acking a resolved alert is a no-op.
+        state
+            .inner
+            .store
+            .resolve_alert("scan:1.2.3.4")
+            .await
+            .unwrap();
+        let reack = ack("/api/alerts/scan:1.2.3.4/ack", "").await.unwrap();
+        assert_eq!(reack.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn silences_roundtrip_through_rest() {
+        let (state, _rx) = test_state();
+        let alert = mist_types::Alert {
+            id: "scan:1.2.3.4".to_owned(),
+            severity: mist_types::Severity::Critical,
+            title: "Port scan of node-1".to_owned(),
+            detail: "detail".to_owned(),
+            first_seen_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            labels: HashMap::default(),
+            explanation: None,
+        };
+        state.inner.store.upsert_alert(&alert).await.unwrap();
+
+        let app = || router(state.clone());
+        let token = auth::create_token("tester@example.com", &state.inner.jwt_secret).unwrap();
+        let bearer = format!("Bearer {token}");
+        let body_json = async |response: axum::response::Response| {
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        let get = |uri: &str| {
+            app().oneshot(
+                Request::get(uri)
+                    .header("authorization", bearer.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let post = |uri: &str, body: serde_json::Value| {
+            app().oneshot(
+                Request::post(uri)
+                    .header("authorization", bearer.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+        };
+
+        let empty = get("/api/silences").await.unwrap();
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(body_json(empty).await.as_array().unwrap().len(), 0);
+
+        let bad_severity = post(
+            "/api/silences",
+            serde_json::json!({"severity": "bogus", "ends_at_ms": u64::MAX}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_severity.status(), StatusCode::BAD_REQUEST);
+
+        let bad_window = post(
+            "/api/silences",
+            serde_json::json!({"starts_at_ms": 2000, "ends_at_ms": 1000}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_window.status(), StatusCode::BAD_REQUEST);
+
+        let created = post(
+            "/api/silences",
+            serde_json::json!({
+                "severity": "CRITICAL",
+                "title_contains": "port scan",
+                "ends_at_ms": u64::MAX,
+                "comment": "investigating",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let rule = body_json(created).await;
+        assert_eq!(rule["severity"], "critical");
+        assert_eq!(rule["created_by"], "tester@example.com");
+        let id = rule["id"].as_i64().expect("numeric id");
+
+        // The matching alert now reads back silenced.
+        let one = get("/api/alerts/scan:1.2.3.4").await.unwrap();
+        assert_eq!(body_json(one).await["silenced"], true);
+
+        let missing = app()
+            .oneshot(
+                Request::delete("/api/silences/9999")
+                    .header("authorization", bearer.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let deleted = app()
+            .oneshot(
+                Request::delete(format!("/api/silences/{id}"))
+                    .header("authorization", bearer.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let one = get("/api/alerts/scan:1.2.3.4").await.unwrap();
+        assert_eq!(body_json(one).await["silenced"], false);
+    }
+
     async fn serve_addr(state: AppState) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1125,9 +1410,16 @@ mod tests {
                 explanation: None,
             },
             state: store::AlertLifecycle::Firing,
+            acked_by: None,
+            ack_note: None,
+            silenced: false,
             occurrences: 1,
         };
-        events_tx.send(AlertEvent::Alert { alert: view }).unwrap();
+        events_tx
+            .send(AlertEvent::Alert {
+                alert: Box::new(view),
+            })
+            .unwrap();
         let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
             .await
             .unwrap()

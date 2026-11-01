@@ -344,6 +344,9 @@ mod tests {
             explanation: None,
             state,
             occurrences: 1,
+            acked_by: None,
+            ack_note: None,
+            silenced: false,
         }
     }
 
