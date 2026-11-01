@@ -1,11 +1,12 @@
-//! Route table: `/login` vs the guarded `/` shell (`/` overview, `/flows`, `/alerts`).
+//! Route table: `/login` vs the guarded `/` shell (`/` overview, `/flows`,
+//! `/alerts`, `/policies`).
 
 use leptos::prelude::*;
 use leptos_router::components::{ParentRoute, Route, Router, Routes};
 use leptos_router::path;
 
 use crate::state::AppState;
-use crate::views::{AlertsView, FlowsView, LoginView, OverviewView, Shell};
+use crate::views::{AlertsView, FlowsView, LoginView, OverviewView, PoliciesView, Shell};
 
 /// Top-level component: provides shared state and renders the route table.
 #[component]
@@ -19,6 +20,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("") view=OverviewView />
                     <Route path=path!("flows") view=FlowsView />
                     <Route path=path!("alerts") view=AlertsView />
+                    <Route path=path!("policies") view=PoliciesView />
                 </ParentRoute>
             </Routes>
         </Router>

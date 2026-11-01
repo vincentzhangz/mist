@@ -176,7 +176,7 @@ API routes (`crates/mist-api/src/main.rs` `router`): `GET /healthz`,
 `GET /api/flows`, `GET /api/alerts`, `GET /api/alerts/{id}`,
 `POST /api/alerts/{id}/resolve`, `POST /api/alerts/{id}/ack`,
 `GET`/`POST /api/silences`, `DELETE /api/silences/{id}`,
-`POST /api/ingest`, `GET /api/ws`.
+`GET /api/policies/recommend?namespace=X`, `POST /api/ingest`, `GET /api/ws`.
 Unknown `/api/*` paths return a JSON 404 (never the dashboard shell).
 Operator webhook: `POST /alerts`.
 
@@ -185,6 +185,15 @@ re-fires) → `resolved`; a re-fire reopens `resolved` back to `firing` and
 drops the old ack. Silence rules (severity / title substring / alert id /
 label matchers + time window) keep matching alerts stored and visible but
 skip their notifications; reads stamp a `silenced` flag on views.
+
+Policy recommendations (`/api/policies/recommend`, Policies dashboard
+view) turn observed external traffic into a review-ready namespace
+`NetworkPolicy`: one policy per namespace covering all its pods, with
+`ipBlock` egress/ingress rules per external endpoint and port. Reply
+traffic (ephemeral local ports), internal remotes, and non-TCP/UDP/SCTP
+protocols are excluded and counted; namespaces with no external traffic
+get an explicit deny-all. Per-workload selectors need pod labels, which
+flows don't carry yet — that scoping is future work.
 
 ## Testing
 

@@ -9,7 +9,7 @@ use gloo_net::http::Request;
 
 use crate::dto::{
     AckRequest, AlertView, ErrorBody, FlowRecord, LoginRequest, LoginResponse, NewSilenceRequest,
-    Silence,
+    PolicyRecommendation, Silence,
 };
 
 /// Error from an API call, carrying a human-readable message.
@@ -253,6 +253,24 @@ pub async fn create_silence(token: &str, rule: &NewSilenceRequest) -> Result<Sil
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?,
     )
+}
+
+/// Recommend a namespace `NetworkPolicy` from observed flows.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the response is unexpected.
+pub async fn fetch_recommendation(
+    token: &str,
+    namespace: &str,
+) -> Result<PolicyRecommendation, ApiError> {
+    let path = format!(
+        "/api/policies/recommend?namespace={}",
+        urlencoding::encode(namespace)
+    );
+    let text = get_authed(&path, token).await?;
+    serde_json::from_str::<PolicyRecommendation>(&text)
+        .map_err(|e| ApiError::Decode(format!("invalid recommendation response: {e}")))
 }
 
 /// Delete a silence rule. The API answers 204 with no body.

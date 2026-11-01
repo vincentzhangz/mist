@@ -22,6 +22,7 @@ mod auth;
 mod llm;
 mod metrics;
 mod notify;
+mod policy;
 mod ratelimit;
 mod store;
 
@@ -285,6 +286,34 @@ async fn delete_silence(
     } else {
         Err(AppError::NotFound)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyQuery {
+    namespace: Option<String>,
+    since_ms: Option<u64>,
+    limit: Option<i64>,
+}
+
+/// Recommend a namespace `NetworkPolicy` from observed flows.
+async fn recommend_policy(
+    State(state): State<AppState>,
+    Query(query): Query<PolicyQuery>,
+) -> Result<Json<policy::Recommendation>, AppError> {
+    let namespace = query
+        .namespace
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("namespace query param is required".to_owned()))?;
+    let filter = FlowFilter {
+        node: None,
+        namespace: Some(namespace.clone()),
+        pod: None,
+        since_ms: query.since_ms,
+        limit: query.limit.unwrap_or(5000).clamp(1, 20_000),
+    };
+    let flows = state.inner.store.list_flows(&filter).await?;
+    let cidrs = analyzer::DetectorConfig::default().internal_cidrs;
+    Ok(Json(policy::recommend(&flows, &namespace, &cidrs)))
 }
 
 async fn ingest(
@@ -584,6 +613,7 @@ fn router(state: AppState) -> Router {
         .route("/api/alerts/{id}/ack", post(ack_alert))
         .route("/api/silences", get(list_silences).post(create_silence))
         .route("/api/silences/{id}", delete(delete_silence))
+        .route("/api/policies/recommend", get(recommend_policy))
         .route("/api/ingest", post(ingest))
         .route("/api/ws", get(ws_handler));
     let app = if state.inner.spa.is_some() {

@@ -1,5 +1,5 @@
 // UI proof: WebKit click-through of the dashboard against kind.
-// login -> overview -> flows table -> limit control -> alerts -> logout, no page errors.
+// login -> overview -> flows table -> limit control -> alerts -> policies -> logout, no page errors.
 import { webkit } from 'playwright';
 import { spawn } from 'node:child_process';
 
@@ -105,6 +105,20 @@ async function main() {
     } else {
       check('alert detail offers actions', true, 'no rows to select');
     }
+    await page.click('nav a[href="/policies"]');
+    await page.waitForURL('**/policies', { timeout: 15000 });
+    await page.waitForSelector('section.policies pre.yaml', { timeout: 15000 });
+    const yaml = await page.evaluate(
+      () => document.querySelector('section.policies pre.yaml')?.textContent ?? '',
+    );
+    check('policies view renders recommendation', yaml.includes('kind: NetworkPolicy'));
+    await page.fill('section.policies input[type="text"]', 'kube-system');
+    await page.click('section.policies button:not(.logout)');
+    await page.waitForTimeout(1000);
+    const regen = await page.evaluate(
+      () => document.querySelector('section.policies pre.yaml')?.textContent ?? '',
+    );
+    check('policies regenerate per namespace', regen.includes('namespace: kube-system'));
     await page.click('button.logout');
     await page.waitForURL('**/login', { timeout: 15000 });
     check('logout returns to /login', true);

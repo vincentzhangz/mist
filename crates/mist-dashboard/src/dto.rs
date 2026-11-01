@@ -163,6 +163,33 @@ pub struct AckRequest {
     pub note: Option<String>,
 }
 
+/// One allowed destination port in a recommendation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortRule {
+    pub port: u16,
+    pub protocol: String,
+}
+
+/// One allowed remote: a `/32` (or `/128`) plus its observed ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CidrRule {
+    pub cidr: String,
+    pub ports: Vec<PortRule>,
+}
+
+/// Namespace recommendation from `GET /api/policies/recommend`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRecommendation {
+    pub namespace: String,
+    pub flows_analyzed: usize,
+    pub internal_flows: usize,
+    pub unsupported_flows: usize,
+    pub workloads: Vec<String>,
+    pub external_egress: Vec<CidrRule>,
+    pub external_ingress: Vec<CidrRule>,
+    pub yaml: String,
+}
+
 /// Body sent to `POST /api/auth/login`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginRequest {

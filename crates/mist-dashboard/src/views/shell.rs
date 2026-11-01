@@ -124,6 +124,7 @@ pub fn Shell() -> impl IntoView {
                         <A href="/">"Overview"</A>
                         <A href="/flows">"Flows"</A>
                         <A href="/alerts">"Alerts"</A>
+                        <A href="/policies">"Policies"</A>
                     </nav>
                     <span class="spacer" />
                     <span class=move || {

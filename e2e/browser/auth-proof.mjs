@@ -100,6 +100,10 @@ async function main() {
     check('unmute clears flag', unmuted.status === 204 && clear.silenced === false);
     const done = await (await fetch(`${BASE}/api/alerts/${enc}/resolve`, { method: 'POST', headers: authz })).json();
     check('resolve after ack works', done.state === 'resolved');
+    const noNs = await fetch(`${BASE}/api/policies/recommend`, { headers: authz });
+    check('recommend without namespace is 400', noNs.status === 400, `status=${noNs.status}`);
+    const rec = await (await fetch(`${BASE}/api/policies/recommend?namespace=default`, { headers: authz })).json();
+    check('recommend returns policy YAML', typeof rec.yaml === 'string' && rec.yaml.includes('kind: NetworkPolicy'), `flows=${rec.flows_analyzed}`);
     const metrics = await (await fetch(`${BASE}/metrics`)).text();
     const accepted = metrics.match(/mist_api_ingest_batches_accepted_total (\d+)/)?.[1];
     check('agents shipping through token auth', Number(accepted) > 0, `accepted=${accepted}`);
