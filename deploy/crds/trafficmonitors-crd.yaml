@@ -37,6 +37,16 @@ spec:
                 default: http://mist-api.mist.svc.cluster.local:3000
                 description: Base URL agents ship flow batches to.
                 type: string
+              clientCertSecretName:
+                description: |-
+                  Name of a Secret holding the agent mTLS identity (keys `tls.crt` +
+                  `tls.key`) and the API server CA (`ca.crt`). When set, the agent
+                  mounts it at `/tls/agent` and presents the client certificate to
+                  the API's ingest-only mTLS port -- so also point `api_url` at
+                  `https://...:3001`. When unset, agents ship over plain HTTP(S)
+                  with token auth only.
+                nullable: true
+                type: string
               nodeSelector:
                 additionalProperties:
                   type: string

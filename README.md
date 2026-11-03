@@ -126,6 +126,8 @@ Verified against the code — no invented knobs.
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset → login fails closed (401) | Bootstrap admin, argon2-hashed + upserted at startup |
 | `INGEST_TOKEN` / `INGEST_TOKENS` | unset → ingest open + loud warning | Accepted agent credentials (single + comma-separated), required as `Bearer` on `/api/ingest` when any is set |
 | `TLS_CERT` / `TLS_KEY` | unset → plain HTTP | PEM certificate + key paths; both set serves HTTPS, exactly one set is a startup error |
+| `CLIENT_CA_CERT` | unset → ingest on main port | PEM client-CA path; set (with the pair above) opens an ingest-only mTLS listener and removes `/api/ingest` from the main port |
+| `INGEST_BIND_ADDR` | `0.0.0.0:3001` | Listen address of the mTLS ingest listener (only used with `CLIENT_CA_CERT`) |
 | `SERVE_DIR` | `crates/mist-dashboard/dist` | Dashboard bundle dir; missing `index.html` → API-only mode |
 | `LLM_API_KEY` | unset → explanations disabled | Enables the LLM alert explainer (OpenAI-compatible chat completions), sent as `Bearer` |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Chat-completions root; setting it alone (no key) also enables, for keyless servers like Ollama |
@@ -159,6 +161,8 @@ CV ≤0.15, mean gap ≥5s.
 | `--object` | `mist-ebpf.o` | Path to the compiled eBPF object (`/etc/mist/mist-ebpf.o` in-cluster) |
 | `--api-url` | `http://localhost:3000` | Batches POST to `{api-url}/api/ingest` |
 | `--api-token` / `MIST_API_TOKEN` | empty → no header | Bearer token for `/api/ingest` (operator injects from Secret) |
+| `--tls-ca-cert` / `MIST_TLS_CA_CERT` | unset → system roots | PEM server-CA path (needed for self-signed API certs) |
+| `--tls-cert` / `MIST_TLS_CERT` + `--tls-key` / `MIST_TLS_KEY` | unset → no client cert | PEM client identity for mTLS ingest; must pair, half-set is a startup error |
 | `--interval-secs` | `5` | Drain interval |
 | `NODE_NAME` | `/etc/hostname` → `unknown` | Node label on emitted flows |
 | `RUST_LOG` | `info` | Tracing filter |
@@ -169,31 +173,74 @@ CV ≤0.15, mean gap ≥5s.
 `watchedNamespaces`, `sampleIntervalSecs` (5), `agentImage`
 (`mist-agent:dev`), `nodeSelector`, `apiUrl`, `objectPath`
 (`/etc/mist/mist-ebpf.o`), `apiTokenSecretName` (optional Secret for the
-agent ingest token).
+agent ingest token), `clientCertSecretName` (optional Secret with
+`tls.crt` + `tls.key` + `ca.crt` for agent mTLS, mounted at `/tls/agent`).
 
-API routes (`crates/mist-api/src/main.rs` `router`): `GET /healthz`,
+API routes (`crates/mist-api/src/routes.rs` `router`): `GET /healthz`,
 `GET /metrics` (public Prometheus scrape), `POST /api/auth/login`,
-`GET /api/flows`, `GET /api/alerts`, `GET /api/alerts/{id}`,
+`GET /api/flows` (paged `{flows, next_cursor}`, `before_ms` cursor),
+`GET /api/alerts` (paged `{alerts, next_cursor}`, `before_ms` cursor),
+`GET /api/alerts/{id}`,
 `POST /api/alerts/{id}/resolve`, `POST /api/alerts/{id}/ack`,
 `GET`/`POST /api/silences`, `DELETE /api/silences/{id}`,
-`GET /api/policies/recommend?namespace=X`, `POST /api/ingest`, `GET /api/ws`.
+`GET /api/policies/recommend?namespace=X`, `POST /api/ingest` (ingest-only mTLS port when `CLIENT_CA_CERT` is set), `GET /api/ws`,
+`GET /api/health/overview` (JWT; uptime, analyzer queue, agent heartbeats).
 Unknown `/api/*` paths return a JSON 404 (never the dashboard shell).
 Operator webhook: `POST /alerts`.
+
+System health: agents ship every drain interval even when idle, so each
+batch doubles as a heartbeat carrying cumulative eBPF counters (`updated` /
+`skipped` / `map_full`); empty batches are recorded and counted but skip
+analysis. The Health dashboard view shows API uptime, analyzer queue depth,
+and per-agent liveness — a node quiet for over 30s reads stale.
+
+Flow pagination: `GET /api/flows` returns newest-first pages with an
+inclusive `next_cursor` (`before_ms` fetches older). The inclusive bound
+repeats millisecond ties at the page edge — clients dedupe by row key —
+and a short page (or a page adding no new rows) means exhaustion. The
+Flows view merges the live feed with view-local paged history behind a
+"Load more" button, so websocket prepends never truncate loaded pages.
 
 Alert lifecycle: `firing` → `acknowledged` (ack keeps owner + note, survives
 re-fires) → `resolved`; a re-fire reopens `resolved` back to `firing` and
 drops the old ack. Silence rules (severity / title substring / alert id /
 label matchers + time window) keep matching alerts stored and visible but
-skip their notifications; reads stamp a `silenced` flag on views.
+skip their notifications; reads stamp a `silenced` flag on views. The list
+pages newest-first like flows (inclusive `next_cursor`, server-side state
+/ severity filters), and the Alerts view merges live updates with paged
+history behind a "Load more" button.
 
 Policy recommendations (`/api/policies/recommend`, Policies dashboard
-view) turn observed external traffic into a review-ready namespace
-`NetworkPolicy`: one policy per namespace covering all its pods, with
-`ipBlock` egress/ingress rules per external endpoint and port. Reply
-traffic (ephemeral local ports), internal remotes, and non-TCP/UDP/SCTP
-protocols are excluded and counted; namespaces with no external traffic
-get an explicit deny-all. Per-workload selectors need pod labels, which
-flows don't carry yet — that scoping is future work.
+view) turn observed external traffic into review-ready `NetworkPolicy`
+docs: one policy per workload (pods sharing the same selector labels)
+with `ipBlock` egress/ingress rules per external endpoint and port, plus
+a namespace default-deny-all. Selectors are pod labels minus
+`pod-template-hash` (rollout-unstable); pods with external traffic but no
+usable labels are listed as uncovered instead of getting rules. Queries
+a workload sends to internal DNS (port 53) earn a UDP+TCP carve-out per
+workload — namespace+pod selector when the server pod was attributed,
+else an `ipBlock` fallback — so the deny-all doesn't break resolution.
+Other reply traffic (ephemeral local ports), internal remotes, and
+non-TCP/UDP/SCTP protocols are excluded and counted; namespaces with no
+external traffic get a single deny-all. Empty rule lists still block
+pod-to-pod traffic, so review before enforcing.
+
+mTLS ingest (opt-in): with `TLS_CERT` + `TLS_KEY` + `CLIENT_CA_CERT` the API
+serves HTTPS on `:3000` and a second, ingest-only listener on `:3001`
+(`INGEST_BIND_ADDR`) that requires a client certificate in the TLS
+handshake — peers without one never reach a handler, and `/api/ingest`
+leaves the main port so it cannot bypass the gate. The agent
+authenticates with `--tls-cert` + `--tls-key` (`MIST_TLS_CERT` /
+`MIST_TLS_KEY`), trusts the server CA via `--tls-ca-cert`, and keeps
+sending its ingest Bearer [REDACTED] well (defense in depth). A half-mounted
+identity is a startup error on both ends, never a silent downgrade. Wiring
+is Secret-driven: the Helm chart takes `api.tlsSecretName` (server
+`tls.crt` + `tls.key`, client `ca.crt`) and `agent.clientCertSecretName`
+(agent `tls.crt` + `tls.key`, server `ca.crt`), switching probes to HTTPS
+and opening Service port 3001; the operator mounts the agent side from
+`TrafficMonitor.spec.clientCertSecretName`. Verification is membership
+only — any client chaining to the CA is accepted; cert subjects are not
+mapped to nodes yet.
 
 ## Testing
 
@@ -209,8 +256,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Ingest uses one shared token** (`INGEST_TOKEN`; open when
   unprovisioned): keep the API cluster-local unless it is set, and prefer
   per-node credentials or mTLS before treating agents as untrusted. Login
-  has no rate limiting yet — keep a rate-limiting ingress in front of any
-  internet-facing deployment.
+  has a per-IP sliding-window limiter, but keep a rate-limiting ingress
+  in front of any internet-facing deployment anyway.
 - **Images default to `:dev`** in `deploy/` and chart defaults (build +
   `kind load` locally); tagging `v*` pushes `:tag` + `:latest` to GHCR
   via the release workflow for real clusters.
@@ -221,9 +268,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   in-memory broadcast, so a second API replica would split the WS
   stream — shared pub/sub first); no resource autoscaling. TLS is
   opt-in (`TLS_CERT`/`TLS_KEY`) or terminates at your ingress.
-- **Dashboard is CSR-only**: login/flows/alerts views ship and passed a
-  scripted in-browser proof (login → live flows → alerts → logout), but
-  there is no SSR and no pagination; the proof script isn't committed.
+- **Dashboard is CSR-only**: overview/flows/alerts/policies/health views
+  ship and pass scripted in-browser proofs (`e2e/browser/ui-proof.mjs`,
+  `e2e/browser/auth-proof.mjs`), but there is no SSR. Flows and alerts page
+  through cursors behind "Load more" buttons.
 - **eBPF sensor is Linux-only** and needs BTF ≥5.15 + `clsact`;
   load-tested to 229 Gb/s / 16k-flow bursts in kind (see
   `docs/architecture.md`), but the 16k map has no headroom past that —

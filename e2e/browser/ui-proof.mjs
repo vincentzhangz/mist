@@ -1,31 +1,15 @@
 // UI proof: WebKit click-through of the dashboard against kind.
-// login -> overview -> flows table -> limit control -> alerts -> policies -> logout, no page errors.
+// login -> overview -> flows table -> limit control -> alerts -> policies -> health -> logout, no page errors.
 import { webkit } from 'playwright';
-import { spawn } from 'node:child_process';
+import { NS, EMAIL, PASSWORD, baseFor, check, failureCount, run, startPortForward } from './lib.mjs';
 
-const NS = process.env.MIST_NAMESPACE ?? 'mist';
 const PORT = process.env.MIST_PORT ?? '3100';
-const BASE = `http://127.0.0.1:${PORT}`;
-const EMAIL = process.env.MIST_EMAIL ?? 'admin@example.com';
-const PASSWORD = process.env.MIST_PASSWORD ?? 's3cret-for-kind';
-
-let failures = 0;
-const check = (name, ok, extra = '') => {
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`);
-  if (!ok) failures++;
-};
+const BASE = baseFor(PORT);
 
 async function main() {
-  const pf = spawn('kubectl', ['-n', NS, 'port-forward', 'svc/mist-api', `${PORT}:3000`], { stdio: 'ignore' });
+  const pf = await startPortForward(NS, PORT, BASE);
   const browser = await webkit.launch();
   try {
-    for (let i = 0; i < 150; i++) {
-      try {
-        const r = await fetch(`${BASE}/healthz`);
-        if (r.status === 200) break;
-      } catch { /* not up */ }
-      await new Promise((r) => setTimeout(r, 200));
-    }
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e).slice(0, 160)));
@@ -81,6 +65,19 @@ async function main() {
       () => document.querySelectorAll('section.flows table tbody tr').length,
     );
     check('clearing search restores rows', restoredRows > 0, `rows=${restoredRows}`);
+    const loadMore = page.locator('section.flows button', { hasText: 'Load more' });
+    if (await loadMore.count() > 0) {
+      await loadMore.click();
+      await page.waitForFunction(
+        (n) => document.querySelectorAll('section.flows tbody tr').length > n
+          || document.body.textContent.includes('No more flows.'),
+        restoredRows,
+        { timeout: 15000 },
+      );
+    }
+    const grownRows = await page.locator('section.flows tbody tr').count();
+    const exhaustedShown = await page.locator('section.flows p.muted', { hasText: 'No more flows.' }).count();
+    check('load more appends history', grownRows > restoredRows || exhaustedShown > 0, `rows=${restoredRows}->${grownRows}`);
     await page.click('nav a[href="/alerts"]');
     await page.waitForURL('**/alerts', { timeout: 15000 });
     await page.waitForSelector('section.alerts ul.alert-list, section.alerts p.muted', { timeout: 15000 });
@@ -105,6 +102,20 @@ async function main() {
     } else {
       check('alert detail offers actions', true, 'no rows to select');
     }
+    const alertRows = await page.locator('section.alerts ul.alert-list li').count();
+    const alertMore = page.locator('section.alerts button', { hasText: 'Load more' });
+    if (await alertMore.count() > 0) {
+      await alertMore.click();
+      await page.waitForFunction(
+        (n) => document.querySelectorAll('section.alerts ul.alert-list li').length > n
+          || document.body.textContent.includes('No more alerts.'),
+        alertRows,
+        { timeout: 15000 },
+      );
+    }
+    const grownAlerts = await page.locator('section.alerts ul.alert-list li').count();
+    const alertsExhausted = await page.locator('section.alerts p.muted', { hasText: 'No more alerts.' }).count();
+    check('alerts load more appends history', grownAlerts > alertRows || alertsExhausted > 0, `rows=${alertRows}->${grownAlerts}`);
     await page.click('nav a[href="/policies"]');
     await page.waitForURL('**/policies', { timeout: 15000 });
     await page.waitForSelector('section.policies pre.yaml', { timeout: 15000 });
@@ -119,6 +130,16 @@ async function main() {
       () => document.querySelector('section.policies pre.yaml')?.textContent ?? '',
     );
     check('policies regenerate per namespace', regen.includes('namespace: kube-system'));
+    const muted = await page.locator('section.policies p.muted').allTextContents();
+    check('policies show workload counts', muted.some((t) => /workload polic/.test(t)), muted.join(' | ').slice(0, 140));
+    check('policies show DNS counts', muted.some((t) => /internal-only, \d+ DNS/.test(t)));
+    await page.click('nav a[href="/health"]');
+    await page.waitForURL('**/health', { timeout: 15000 });
+    await page.waitForSelector('section.health table', { timeout: 15000 });
+    const healthStats = await page.locator('section.health .stat').count();
+    check('health stats render', healthStats === 5, `cards=${healthStats}`);
+    const agentRows = await page.locator('section.health tbody tr').count();
+    check('health view renders agent heartbeats', agentRows > 0, `rows=${agentRows}`);
     await page.click('button.logout');
     await page.waitForURL('**/login', { timeout: 15000 });
     check('logout returns to /login', true);
@@ -127,7 +148,7 @@ async function main() {
     await browser.close().catch(() => {});
     pf.kill('SIGTERM');
   }
-  process.exit(failures ? 1 : 0);
+  process.exit(failureCount() ? 1 : 0);
 }
 
-main().catch((e) => { console.error('FATAL', e); process.exit(2); });
+run(main);

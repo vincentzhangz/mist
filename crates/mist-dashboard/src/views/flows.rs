@@ -2,6 +2,7 @@
 
 use leptos::prelude::*;
 
+use super::paging::{MAX_CHAIN, append_new_rows, merge_rows};
 use crate::api::fetch_flows;
 use crate::dto::{Direction, FlowRecord, protocol_name};
 use crate::state::{AppState, format_time_ms, pod_label};
@@ -48,25 +49,39 @@ fn filter_flows(flows: &[FlowRecord], query: &str) -> Vec<FlowRecord> {
 pub fn FlowsView() -> impl IntoView {
     let state = expect_context::<AppState>();
     let loading = RwSignal::new(true);
+    let loading_more = RwSignal::new(false);
     let error = RwSignal::new(Option::<String>::None);
     let limit = RwSignal::new(200_usize);
     let query = RwSignal::new(String::new());
-    let filtered = Memo::new(move |_| filter_flows(&state.flows.get(), &query.get()));
+    // View-local history: page one plus appended older pages. Kept apart
+    // from the shared live signal so WS prepends (capped at 500) never
+    // truncate loaded history.
+    let history = RwSignal::new(Vec::<FlowRecord>::new());
+    let cursor = RwSignal::new(Option::<u64>::None);
+    let exhausted = RwSignal::new(false);
+    let paged = RwSignal::new(false);
+    let merged = Memo::new(move |_| merge_rows(&state.flows.get(), &history.get()));
+    let filtered = Memo::new(move |_| filter_flows(&merged.get(), &query.get()));
 
-    // REST snapshot, reloaded whenever the token or limit changes
-    // (WS prepends on top of this).
+    // Page one, reloaded whenever the token or limit changes.
     Effect::new(move || {
         let Some(token) = state.token.get() else {
             return;
         };
         let limit = limit.get();
         loading.set(true);
-        let flows_signal = state.flows;
+        let history_signal = history;
+        let cursor_signal = cursor;
+        let exhausted_signal = exhausted;
+        let paged_signal = paged;
         let session = state;
         leptos::task::spawn_local(async move {
-            match fetch_flows(&token, limit).await {
-                Ok(flows) => {
-                    flows_signal.set(flows);
+            match fetch_flows(&token, limit, None).await {
+                Ok(page) => {
+                    history_signal.set(page.flows);
+                    cursor_signal.set(page.next_cursor);
+                    exhausted_signal.set(page.next_cursor.is_none());
+                    paged_signal.set(false);
                     error.set(None);
                 }
                 Err(err) => {
@@ -81,44 +96,14 @@ pub fn FlowsView() -> impl IntoView {
     view! {
         <section class="flows">
             <h2>"Flows"</h2>
-            <div class="filters">
-                <label>
-                    "Limit"
-                    <select
-                        on:change=move |ev| {
-                            limit.set(event_target_value(&ev).parse().unwrap_or(200));
-                        }
-                        prop:value=move || limit.get().to_string()
-                    >
-                        {FLOW_LIMITS
-                            .into_iter()
-                            .map(|n| {
-                                view! { <option value=n.to_string()>{n.to_string()}</option> }
-                            })
-                            .collect::<Vec<_>>()}
-                    </select>
-                </label>
-                <label>
-                    "Search"
-                    <input
-                        type="search"
-                        placeholder="Filter flows…"
-                        spellcheck="false"
-                        autocomplete="off"
-                        on:input=move |ev| {
-                            query.set(event_target_value(&ev));
-                        }
-                        prop:value=move || query.get()
-                    />
-                </label>
-            </div>
+            <FlowsFilters limit=limit query=query />
             <Show when=move || error.get().is_some()>
                 <p class="error" aria-live="polite">
                     {move || error.get().unwrap_or_default()}
                 </p>
             </Show>
             <Show
-                when=move || !loading.get() || !state.flows.get().is_empty()
+                when=move || !loading.get() || !merged.get().is_empty()
                 fallback=|| view! { <p class="muted">"Loading flows…"</p> }
             >
                 <Show
@@ -126,7 +111,7 @@ pub fn FlowsView() -> impl IntoView {
                     fallback=move || {
                         view! {
                             <p class="muted">
-                                {if state.flows.get().is_empty() {
+                                {if merged.get().is_empty() {
                                     "No flows yet."
                                 } else {
                                     "No flows match this filter."
@@ -137,9 +122,143 @@ pub fn FlowsView() -> impl IntoView {
                 >
                     <FlowsTable flows=filtered />
                 </Show>
+                <Show when=move || !history.get().is_empty() && !exhausted.get()>
+                    <button
+                        on:click=move |_| {
+                            load_more(state, Paging {
+                                history,
+                                cursor,
+                                exhausted,
+                                paged,
+                                loading_more,
+                                error,
+                                limit,
+                                merged,
+                            });
+                        }
+                        disabled=move || loading_more.get()
+                    >
+                        {move || if loading_more.get() { "Loading…" } else { "Load more" }}
+                    </button>
+                </Show>
+                <Show when=move || paged.get() && exhausted.get()>
+                    <p class="muted">"No more flows."</p>
+                </Show>
             </Show>
         </section>
     }
+}
+
+/// Limit select + search input for the flows view.
+#[component]
+fn FlowsFilters(limit: RwSignal<usize>, query: RwSignal<String>) -> impl IntoView {
+    view! {
+        <div class="filters">
+            <label>
+                "Limit"
+                <select
+                    on:change=move |ev| {
+                        limit.set(event_target_value(&ev).parse().unwrap_or(200));
+                    }
+                    prop:value=move || limit.get().to_string()
+                >
+                    {FLOW_LIMITS
+                        .into_iter()
+                        .map(|n| {
+                            view! { <option value=n.to_string()>{n.to_string()}</option> }
+                        })
+                        .collect::<Vec<_>>()}
+                </select>
+            </label>
+            <label>
+                "Search"
+                <input
+                    type="search"
+                    placeholder="Filter flows…"
+                    spellcheck="false"
+                    autocomplete="off"
+                    on:input=move |ev| {
+                        query.set(event_target_value(&ev));
+                    }
+                    prop:value=move || query.get()
+                />
+            </label>
+        </div>
+    }
+}
+
+/// View-local paging state for the flows history.
+#[derive(Clone, Copy)]
+struct Paging {
+    history: RwSignal<Vec<FlowRecord>>,
+    cursor: RwSignal<Option<u64>>,
+    exhausted: RwSignal<bool>,
+    paged: RwSignal<bool>,
+    loading_more: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    limit: RwSignal<usize>,
+    merged: Memo<Vec<FlowRecord>>,
+}
+
+/// Fetch older pages until the merged table visibly grows or history ends.
+/// Chaining matters because fetched pages can hide entirely inside the
+/// live window; without it a click would sometimes do nothing visible.
+/// Stops at an absent cursor, or when the cursor stops advancing (only
+/// boundary repeats remain: the exact-multiple tail).
+fn load_more(state: AppState, paging: Paging) {
+    let Some(token) = state.token.get() else {
+        return;
+    };
+    let Some(first) = paging.cursor.get_untracked() else {
+        return;
+    };
+    if paging.loading_more.get_untracked() || paging.exhausted.get_untracked() {
+        return;
+    }
+    paging.loading_more.set(true);
+    let page_size = paging.limit.get_untracked();
+    let session = state;
+    leptos::task::spawn_local(async move {
+        let start_len = paging.merged.get_untracked().len();
+        let mut before = first;
+        for _ in 0..MAX_CHAIN {
+            let page = match fetch_flows(&token, page_size, Some(before)).await {
+                Ok(page) => page,
+                Err(err) => {
+                    session.logout_if_unauthorized(&err);
+                    paging.error.set(Some(err.to_string()));
+                    break;
+                }
+            };
+            // Plain `update`: the `_untracked` twin would not notify
+            // the merged memo, freezing the table.
+            paging.history.update(|rows| {
+                append_new_rows(rows, &page.flows);
+            });
+            paging.paged.set(true);
+            paging.error.set(None);
+            match page.next_cursor {
+                Some(next) if next != before => {
+                    paging.cursor.set(Some(next));
+                    before = next;
+                    if paging.merged.get_untracked().len() > start_len {
+                        break;
+                    }
+                }
+                Some(_) => {
+                    // Cursor stuck: every further page repeats this one.
+                    paging.exhausted.set(true);
+                    break;
+                }
+                None => {
+                    paging.cursor.set(None);
+                    paging.exhausted.set(true);
+                    break;
+                }
+            }
+        }
+        paging.loading_more.set(false);
+    });
 }
 
 /// Scrollable flows table; the wrapper scrolls horizontally on narrow
@@ -248,5 +367,19 @@ mod tests {
         assert_eq!(filter_flows(&flows, "udp").len(), 1);
         assert_eq!(filter_flows(&flows, "54321").len(), 2);
         assert_eq!(filter_flows(&flows, "zzz-no-such-flow").len(), 0);
+    }
+
+    #[test]
+    fn merge_rows_dedupes_flows_by_key() {
+        let a = flow("node-1", "10.0.0.9", 6, Some("web-0"));
+        let mut newer = a.clone();
+        newer.last_seen_unix_ms = 2500;
+        // Exact repeat collapses; same tuple at another time is kept.
+        let live = [a.clone()];
+        let history = [a, newer];
+        let merged = merge_rows(&live, &history);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].last_seen_unix_ms, 2500);
+        assert_eq!(merged[1].last_seen_unix_ms, 0);
     }
 }

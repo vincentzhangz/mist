@@ -132,6 +132,16 @@ spec:
               value: 0.0.0.0:3000
             - name: RUST_LOG
               value: info
+            # mTLS ingest (opt-in): mount a Secret with `tls.crt` + `tls.key`
+            # (server identity) + `ca.crt` (agent client CA) at /tls/api, then
+            # set TLS_CERT=/tls/api/tls.crt, TLS_KEY=/tls/api/tls.key,
+            # CLIENT_CA_CERT=/tls/api/ca.crt and INGEST_BIND_ADDR=0.0.0.0:3001.
+            # The API then serves HTTPS on :3000 plus a client-cert-gated
+            # ingest listener on :3001 (ingest leaves the main port, so also
+            # expose containerPort/Service 3001, switch the probes to
+            # scheme: HTTPS, and point agents at https://...:3001 with their
+            # own client Secret). The Helm chart wires all of this behind
+            # api.tlsSecretName / agent.clientCertSecretName.
           livenessProbe:
             httpGet:
               path: /healthz

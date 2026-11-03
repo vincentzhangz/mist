@@ -229,7 +229,60 @@ pub fn desired_daemonset(
                 ..Default::default()
             });
     }
+    if let Some(secret) = &spec.client_cert_secret_name {
+        mount_client_tls(&mut daemonset, secret)?;
+    }
     Ok(daemonset)
+}
+
+/// Mount the agent mTLS identity Secret (keys `tls.crt`, `tls.key`,
+/// `ca.crt`) at `/tls/agent` and point the `MIST_TLS_*` env at it. The
+/// volume stays required: a named-but-missing Secret must block the pod,
+/// never silently downgrade to token-only ingest.
+fn mount_client_tls(daemonset: &mut DaemonSet, secret: &str) -> Result<(), ReconcileError> {
+    let pod = daemonset
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .context("rendered DaemonSet has no pod spec")?;
+    pod.volumes
+        .get_or_insert_with(Vec::new)
+        .push(k8s_openapi::api::core::v1::Volume {
+            name: "agent-tls".to_owned(),
+            secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                secret_name: Some(secret.to_owned()),
+                default_mode: Some(0o400),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    let container = pod
+        .containers
+        .first_mut()
+        .context("rendered DaemonSet has no agent container")?;
+    for (name, path) in [
+        ("MIST_TLS_CERT", "/tls/agent/tls.crt"),
+        ("MIST_TLS_KEY", "/tls/agent/tls.key"),
+        ("MIST_TLS_CA_CERT", "/tls/agent/ca.crt"),
+    ] {
+        container
+            .env
+            .get_or_insert_with(Vec::new)
+            .push(k8s_openapi::api::core::v1::EnvVar {
+                name: name.to_owned(),
+                value: Some(path.to_owned()),
+                ..Default::default()
+            });
+    }
+    container.volume_mounts.get_or_insert_with(Vec::new).push(
+        k8s_openapi::api::core::v1::VolumeMount {
+            name: "agent-tls".to_owned(),
+            mount_path: "/tls/agent".to_owned(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -345,6 +398,51 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(env.iter().all(|entry| entry["name"] != "MIST_API_TOKEN"));
+    }
+
+    #[test]
+    fn client_cert_secret_mounts_tls_volume() {
+        let mut monitor = monitor_with("mtls", "2026-10-28T09:00:00Z");
+        monitor.spec.client_cert_secret_name = Some("mist-agent-tls".to_owned());
+        let daemonset = desired_daemonset(&monitor, "mtls").unwrap();
+        let value = serde_json::to_value(&daemonset).unwrap();
+        let pod = &value["spec"]["template"]["spec"];
+        let tls = pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == "agent-tls")
+            .unwrap();
+        assert_eq!(tls["secret"]["secretName"], "mist-agent-tls");
+        let container = &pod["containers"][0];
+        let mount = container["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["name"] == "agent-tls")
+            .unwrap();
+        assert_eq!(mount["mountPath"], "/tls/agent");
+        assert_eq!(mount["readOnly"], true);
+        let env = container["env"].as_array().unwrap();
+        for (name, path) in [
+            ("MIST_TLS_CERT", "/tls/agent/tls.crt"),
+            ("MIST_TLS_KEY", "/tls/agent/tls.key"),
+            ("MIST_TLS_CA_CERT", "/tls/agent/ca.crt"),
+        ] {
+            let entry = env.iter().find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(entry["value"], path);
+        }
+        // Unset by default: no TLS volume without the spec field.
+        let plain = monitor_with("plain", "2026-10-28T09:00:00Z");
+        let value = serde_json::to_value(desired_daemonset(&plain, "plain").unwrap()).unwrap();
+        let pod = &value["spec"]["template"]["spec"];
+        assert!(
+            pod["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|volume| volume["name"] != "agent-tls")
+        );
     }
 
     /// The rendered `DaemonSet` must match the golden fixture (minus

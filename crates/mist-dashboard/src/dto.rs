@@ -61,18 +61,29 @@ pub struct FlowRecord {
     pub dst_pod: Option<PodRef>,
 }
 
+/// One page of `GET /api/flows`: newest-first rows plus the inclusive
+/// cursor for the next (older) page, or `None` when exhausted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowsPage {
+    pub flows: Vec<FlowRecord>,
+    pub next_cursor: Option<u64>,
+}
+
 impl FlowRecord {
-    /// Stable row key for keyed list rendering.
+    /// Stable record key: tuple + direction + last-seen. Same tuple at
+    /// different times is a different record; only byte-identical
+    /// boundary repeats (inclusive cursor) share a key.
     #[must_use]
     pub fn row_key(&self) -> String {
         format!(
-            "{}-{}-{}-{}-{}-{:?}",
+            "{}-{}-{}-{}-{}-{:?}-{}",
             self.node,
             self.key.src_ip,
             self.key.src_port,
             self.key.dst_ip,
             self.key.dst_port,
             self.direction,
+            self.last_seen_unix_ms,
         )
     }
 }
@@ -93,6 +104,13 @@ pub enum AlertState {
     Firing,
     Acknowledged,
     Resolved,
+}
+
+/// One page of `GET /api/alerts`, mirroring [`FlowsPage`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsPage {
+    pub alerts: Vec<AlertView>,
+    pub next_cursor: Option<u64>,
 }
 
 /// One alert as returned by `GET /api/alerts` and `GET /api/alerts/{id}`.
@@ -177,17 +195,82 @@ pub struct CidrRule {
     pub ports: Vec<PortRule>,
 }
 
+/// One DNS egress allow: selector- or `ipBlock`-targeted UDP+TCP 53.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRule {
+    pub namespace: Option<String>,
+    pub pod_selector: BTreeMap<String, String>,
+    pub cidr: Option<String>,
+    pub servers: Vec<String>,
+}
+
+/// One workload's slice of a recommendation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadPolicy {
+    pub workload: String,
+    pub selector: BTreeMap<String, String>,
+    pub pods: Vec<String>,
+    pub external_egress: Vec<CidrRule>,
+    pub external_ingress: Vec<CidrRule>,
+    #[serde(default)]
+    pub dns_egress: Vec<DnsRule>,
+}
+
+/// A pod with external traffic but no usable labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UncoveredPod {
+    pub pod: String,
+    pub reason: String,
+}
+
 /// Namespace recommendation from `GET /api/policies/recommend`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyRecommendation {
     pub namespace: String,
     pub flows_analyzed: usize,
     pub internal_flows: usize,
+    #[serde(default)]
+    pub dns_flows: usize,
     pub unsupported_flows: usize,
     pub workloads: Vec<String>,
     pub external_egress: Vec<CidrRule>,
     pub external_ingress: Vec<CidrRule>,
+    #[serde(default)]
+    pub workload_policies: Vec<WorkloadPolicy>,
+    #[serde(default)]
+    pub uncovered: Vec<UncoveredPod>,
     pub yaml: String,
+}
+
+/// Analyzer queue pressure in the health overview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueStatus {
+    pub depth: usize,
+    pub capacity: usize,
+}
+
+/// One agent row in the health overview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHealth {
+    pub node: String,
+    pub last_seen_ms: u64,
+    pub age_secs: u64,
+    pub stale: bool,
+    pub batches_total: u64,
+    pub flows_total: u64,
+    pub updated: u64,
+    pub skipped: u64,
+    pub map_full: u64,
+}
+
+/// System health from `GET /api/health/overview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthOverview {
+    pub uptime_secs: u64,
+    pub storage: String,
+    pub analyzer_queue: QueueStatus,
+    pub ws_subscribers: usize,
+    pub agents: Vec<AgentHealth>,
 }
 
 /// Body sent to `POST /api/auth/login`.

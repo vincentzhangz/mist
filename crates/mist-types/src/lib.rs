@@ -17,10 +17,16 @@ pub struct FlowKey {
 }
 
 /// Reference to a Kubernetes pod an endpoint was attributed to.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `labels` is the pod's metadata labels at attribution time; it defaults
+/// to empty so records from older agents keep parsing. (No `Hash`: label
+/// maps are unhashable, and nothing keys on pods.)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PodRef {
     pub namespace: String,
     pub name: String,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 /// Capture direction of a flow record.
@@ -75,10 +81,22 @@ pub struct Alert {
 }
 
 /// Batch envelope agents POST to `POST /api/ingest`.
+///
+/// The eBPF counters are cumulative per-agent values read from the `STATS`
+/// map; they default to zero so batches from older agents keep parsing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowBatch {
     pub node: String,
     pub flows: Vec<FlowRecord>,
+    /// Packets for which a flow entry was created or updated.
+    #[serde(default)]
+    pub updated: u64,
+    /// Packets skipped (non-IPv4/IPv6 or unsupported L4).
+    #[serde(default)]
+    pub skipped: u64,
+    /// Packets dropped because the flow map was full.
+    #[serde(default)]
+    pub map_full: u64,
 }
 
 #[cfg(test)]
@@ -108,12 +126,23 @@ mod tests {
             src_pod: Some(PodRef {
                 namespace: "prod".to_owned(),
                 name: "api-0".to_owned(),
+                labels: HashMap::from([("app".to_owned(), "api".to_owned())]),
             }),
             dst_pod: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let back: FlowRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(record, back);
+        // Records from older agents omit pod labels entirely.
+        let legacy: FlowRecord = serde_json::from_str(
+            r#"{"key":{"src_ip":"10.0.1.4","src_port":443,"dst_ip":"10.0.2.9",
+                "dst_port":51234,"protocol":6},"direction":"egress","bytes":64,
+                "packets":1,"start_unix_ms":10,"last_seen_unix_ms":10,
+                "node":"node-1","src_pod":{"namespace":"prod","name":"api-0"},
+                "dst_pod":null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.src_pod.unwrap().labels, HashMap::new());
     }
 
     #[test]
@@ -159,6 +188,9 @@ mod tests {
     fn flow_batch_serde_roundtrip() {
         let batch = FlowBatch {
             node: "node-1".to_owned(),
+            updated: 7,
+            skipped: 1,
+            map_full: 0,
             flows: vec![FlowRecord {
                 key: sample_key(),
                 direction: TrafficDirection::Ingress,
@@ -174,5 +206,8 @@ mod tests {
         let json = serde_json::to_string(&batch).unwrap();
         let back: FlowBatch = serde_json::from_str(&json).unwrap();
         assert_eq!(batch, back);
+        // Payloads from older agents omit the counters entirely.
+        let legacy: FlowBatch = serde_json::from_str(r#"{"node":"n","flows":[]}"#).unwrap();
+        assert_eq!((legacy.updated, legacy.skipped, legacy.map_full), (0, 0, 0));
     }
 }

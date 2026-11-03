@@ -632,6 +632,7 @@ mod tests {
             src_pod: Some(mist_types::PodRef {
                 namespace: "prod".to_owned(),
                 name: "api-0".to_owned(),
+                labels: std::collections::HashMap::new(),
             }),
             dst_pod: None,
         }
@@ -641,6 +642,9 @@ mod tests {
         FlowBatch {
             node: "node-1".to_owned(),
             flows: records,
+            updated: 0,
+            skipped: 0,
+            map_full: 0,
         }
     }
 

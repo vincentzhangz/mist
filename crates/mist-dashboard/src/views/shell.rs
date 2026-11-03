@@ -12,7 +12,7 @@ use crate::state::{AppState, WsStatus};
 /// Matches the largest limit the flows view offers.
 const MAX_FLOWS: usize = 500;
 /// Maximum alerts kept in memory when patched by WS events.
-const MAX_ALERTS: usize = 500;
+pub(crate) const MAX_ALERTS: usize = 500;
 
 /// Merge a WS batch at the front, newest first, capped at [`MAX_FLOWS`].
 fn prepend_flows(
@@ -42,7 +42,7 @@ async fn run_ws(url: &str, state: &AppState, token: &str) {
         // The handshake failed and browsers hide the status, so probe the
         // token over REST: a 401 logs out (guard bounces to /login) while
         // a network error keeps the reconnect loop honestly retrying.
-        if let Err(err) = fetch_alerts(token, None, None, 1).await {
+        if let Err(err) = fetch_alerts(token, None, None, 1, None).await {
             state.logout_if_unauthorized(&err);
         }
         return;
@@ -125,6 +125,7 @@ pub fn Shell() -> impl IntoView {
                         <A href="/flows">"Flows"</A>
                         <A href="/alerts">"Alerts"</A>
                         <A href="/policies">"Policies"</A>
+                        <A href="/health">"Health"</A>
                     </nav>
                     <span class="spacer" />
                     <span class=move || {

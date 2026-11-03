@@ -23,6 +23,15 @@ agent:
   # Secret holding the ingest token (key `ingest-token`), e.g. the
   # mist-api-auth Secret below. Empty sends no token (dev only).
   apiTokenSecretName: ""
+  # Secret holding the agent mTLS identity (keys `tls.crt` + `tls.key`) and
+  # the API server CA (`ca.crt`), mounted read-only at /tls/agent. Empty
+  # keeps token-only ingest; set it AND switch apiUrl to
+  # https://mist-api.<namespace>.svc.cluster.local:3001 for mTLS (the API
+  # needs api.tlsSecretName too). Create with:
+  # kubectl -n mist create secret generic mist-agent-tls
+  #   --from-file=tls.crt=agent.crt --from-file=tls.key=agent.key
+  #   --from-file=ca.crt=server-ca.crt
+  clientCertSecretName: ""
   nodeSelector: {}
   tolerations:
     - operator: Exists
@@ -52,6 +61,16 @@ api:
   adminPassword: ""
   ingestToken: ""
   ingestTokens: ""
+  # Secret holding the API server identity (keys `tls.crt` + `tls.key`) and
+  # the agent client CA (`ca.crt`), mounted read-only at /tls/api. Empty
+  # keeps plain HTTP on :3000; set it to serve HTTPS on :3000 plus a
+  # client-cert-gated ingest listener on :3001 (ingest leaves the main
+  # port, probes switch to HTTPS, and agents need clientCertSecretName +
+  # https://...:3001 apiUrl). Create with:
+  # kubectl -n mist create secret generic mist-api-tls
+  #   --from-file=tls.crt=server.crt --from-file=tls.key=server.key
+  #   --from-file=ca.crt=client-ca.crt
+  tlsSecretName: ""
   resources:
     requests:
       cpu: 50m

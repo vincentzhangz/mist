@@ -338,6 +338,7 @@ mod tests {
             src_pod: Some(mist_types::PodRef {
                 namespace: "default".to_owned(),
                 name: "web-0".to_owned(),
+                labels: std::collections::HashMap::new(),
             }),
             dst_pod: None,
         }

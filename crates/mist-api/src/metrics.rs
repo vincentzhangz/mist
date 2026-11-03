@@ -66,6 +66,12 @@ impl Default for Metrics {
 }
 
 impl Metrics {
+    /// Seconds since process start.
+    #[must_use]
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
     /// Record one batch accepted by `/api/ingest` with `flows` records.
     pub fn batch_accepted(&self, flows: usize) {
         self.ingest_batches_accepted.fetch_add(1, Ordering::Relaxed);
@@ -235,7 +241,7 @@ impl Metrics {
             &mut out,
             "mist_api_uptime_seconds",
             "Seconds since process start.",
-            self.started_at.elapsed().as_secs(),
+            self.uptime_secs(),
         );
         out.push_str("# HELP mist_api_build_info Build metadata.\n");
         out.push_str("# TYPE mist_api_build_info gauge\n");

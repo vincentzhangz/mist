@@ -95,9 +95,9 @@ pub fn OverviewView() -> impl IntoView {
         loading.set(true);
         let session = state;
         leptos::task::spawn_local(async move {
-            match fetch_flows(&token, 500).await {
-                Ok(flows) => {
-                    session.flows.set(flows);
+            match fetch_flows(&token, 500, None).await {
+                Ok(page) => {
+                    session.flows.set(page.flows);
                     error.set(None);
                 }
                 Err(err) => {
@@ -105,9 +105,9 @@ pub fn OverviewView() -> impl IntoView {
                     error.set(Some(err.to_string()));
                 }
             }
-            match fetch_alerts(&token, Some("firing"), None, 200).await {
-                Ok(alerts) => {
-                    session.alerts.set(alerts);
+            match fetch_alerts(&token, Some("firing"), None, 200, None).await {
+                Ok(page) => {
+                    session.alerts.set(page.alerts);
                 }
                 Err(err) => {
                     session.logout_if_unauthorized(&err);

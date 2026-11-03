@@ -10,7 +10,9 @@ anyhow.workspace = true
 clap.workspace = true
 mist-flow.workspace = true
 mist-types.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
+rustls-pemfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -19,7 +21,9 @@ tracing-subscriber.workspace = true
 aya.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
-reqwest.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
 
 [lints]
 workspace = true

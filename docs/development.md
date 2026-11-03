@@ -70,8 +70,8 @@ TLS_CERT=/tmp/mist-cert.pem TLS_KEY=/tmp/mist-key.pem \
 
 - The agent is Linux-only at runtime: on other OSes it exits with
   `mist-agent requires Linux (eBPF); refusing to run on this platform`.
-  Its pure helpers (`convert::` in `crates/mist-agent/src/main.rs`) are
-  unit-tested on any host.
+  Its pure helpers (`crates/mist-agent/src/convert.rs`) are unit-tested
+  on any host.
 - The VM kernel needs BTF enabled and ≥5.15 for CO-RE; TC `clsact` qdisc
   support is required on the attach interfaces. kind's default node image
   qualifies — if `tc qdisc add clsact` fails there, the sensor design must

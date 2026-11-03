@@ -8,8 +8,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use gloo_net::http::Request;
 
 use crate::dto::{
-    AckRequest, AlertView, ErrorBody, FlowRecord, LoginRequest, LoginResponse, NewSilenceRequest,
-    PolicyRecommendation, Silence,
+    AckRequest, AlertView, AlertsPage, ErrorBody, FlowsPage, HealthOverview, LoginRequest,
+    LoginResponse, NewSilenceRequest, PolicyRecommendation, Silence,
 };
 
 /// Error from an API call, carrying a human-readable message.
@@ -115,16 +115,37 @@ pub async fn login(email: &str, password: &str) -> Result<LoginResponse, ApiErro
 /// # Errors
 ///
 /// Returns [`ApiError`] when the request fails or the response is unexpected.
-pub async fn fetch_flows(token: &str, limit: usize) -> Result<Vec<FlowRecord>, ApiError> {
-    let path = format!("/api/flows?limit={limit}");
-    let text = get_authed(&path, token).await?;
-    serde_json::from_str::<Vec<FlowRecord>>(&text)
+/// Query string for one flows page. `before` is the inclusive `next_cursor`
+/// of the previous page; `None` fetches the newest rows.
+#[must_use]
+pub fn flows_query(limit: usize, before: Option<u64>) -> String {
+    let mut query = format!("/api/flows?limit={limit}");
+    if let Some(cursor) = before {
+        query.push_str("&before_ms=");
+        query.push_str(&cursor.to_string());
+    }
+    query
+}
+
+pub async fn fetch_flows(
+    token: &str,
+    limit: usize,
+    before: Option<u64>,
+) -> Result<FlowsPage, ApiError> {
+    let text = get_authed(&flows_query(limit, before), token).await?;
+    serde_json::from_str::<FlowsPage>(&text)
         .map_err(|e| ApiError::Decode(format!("invalid flows response: {e}")))
 }
 
-/// Query string for the alerts list endpoint.
+/// Query string for the alerts list endpoint. `before` is the inclusive
+/// `next_cursor` for older pages, mirroring [`flows_query`].
 #[must_use]
-pub fn alerts_query(state: Option<&str>, severity: Option<&str>, limit: usize) -> String {
+pub fn alerts_query(
+    state: Option<&str>,
+    severity: Option<&str>,
+    limit: usize,
+    before: Option<u64>,
+) -> String {
     let mut query = format!("/api/alerts?limit={limit}");
     if let Some(state) = state.filter(|s| !s.is_empty() && *s != "all") {
         query.push_str("&state=");
@@ -134,10 +155,14 @@ pub fn alerts_query(state: Option<&str>, severity: Option<&str>, limit: usize) -
         query.push_str("&severity=");
         query.push_str(severity);
     }
+    if let Some(cursor) = before {
+        query.push_str("&before_ms=");
+        query.push_str(&cursor.to_string());
+    }
     query
 }
 
-/// Fetch alerts with optional server-side filters.
+/// Fetch one alerts page with optional server-side filters.
 ///
 /// # Errors
 ///
@@ -147,9 +172,10 @@ pub async fn fetch_alerts(
     state: Option<&str>,
     severity: Option<&str>,
     limit: usize,
-) -> Result<Vec<AlertView>, ApiError> {
-    let text = get_authed(&alerts_query(state, severity, limit), token).await?;
-    serde_json::from_str::<Vec<AlertView>>(&text)
+    before: Option<u64>,
+) -> Result<AlertsPage, ApiError> {
+    let text = get_authed(&alerts_query(state, severity, limit, before), token).await?;
+    serde_json::from_str::<AlertsPage>(&text)
         .map_err(|e| ApiError::Decode(format!("invalid alerts response: {e}")))
 }
 
@@ -271,6 +297,17 @@ pub async fn fetch_recommendation(
     let text = get_authed(&path, token).await?;
     serde_json::from_str::<PolicyRecommendation>(&text)
         .map_err(|e| ApiError::Decode(format!("invalid recommendation response: {e}")))
+}
+
+/// Fetch the system health overview.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the request fails or the response is unexpected.
+pub async fn fetch_health_overview(token: &str) -> Result<HealthOverview, ApiError> {
+    let text = get_authed("/api/health/overview", token).await?;
+    serde_json::from_str::<HealthOverview>(&text)
+        .map_err(|e| ApiError::Decode(format!("invalid health response: {e}")))
 }
 
 /// Delete a silence rule. The API answers 204 with no body.
@@ -409,14 +446,27 @@ mod tests {
 
     #[test]
     fn alerts_query_shapes() {
-        assert_eq!(alerts_query(None, None, 200), "/api/alerts?limit=200");
+        assert_eq!(alerts_query(None, None, 200, None), "/api/alerts?limit=200");
         assert_eq!(
-            alerts_query(Some("firing"), Some("critical"), 50),
+            alerts_query(Some("firing"), Some("critical"), 50, None),
             "/api/alerts?limit=50&state=firing&severity=critical"
         );
         assert_eq!(
-            alerts_query(Some("all"), Some("all"), 10),
+            alerts_query(Some("all"), Some("all"), 10, None),
             "/api/alerts?limit=10"
+        );
+        assert_eq!(
+            alerts_query(None, None, 200, Some(1_700_000_000_000)),
+            "/api/alerts?limit=200&before_ms=1700000000000"
+        );
+    }
+
+    #[test]
+    fn flows_query_shapes() {
+        assert_eq!(flows_query(200, None), "/api/flows?limit=200");
+        assert_eq!(
+            flows_query(100, Some(1_700_000_000_000)),
+            "/api/flows?limit=100&before_ms=1700000000000"
         );
     }
 

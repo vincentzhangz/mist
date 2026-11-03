@@ -61,6 +61,14 @@ pub struct TrafficMonitorSpec {
     /// authenticates `POST /api/ingest`; when unset, agents send no token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token_secret_name: Option<String>,
+    /// Name of a Secret holding the agent mTLS identity (keys `tls.crt` +
+    /// `tls.key`) and the API server CA (`ca.crt`). When set, the agent
+    /// mounts it at `/tls/agent` and presents the client certificate to
+    /// the API's ingest-only mTLS port -- so also point `api_url` at
+    /// `https://...:3001`. When unset, agents ship over plain HTTP(S)
+    /// with token auth only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_secret_name: Option<String>,
 }
 
 impl Default for TrafficMonitorSpec {
@@ -73,6 +81,7 @@ impl Default for TrafficMonitorSpec {
             api_url: default_api_url(),
             object_path: default_object_path(),
             api_token_secret_name: None,
+            client_cert_secret_name: None,
         }
     }
 }

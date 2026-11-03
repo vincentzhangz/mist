@@ -26,6 +26,12 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        {{- if .Values.api.tlsSecretName }}
+        # The API runs as 10001 (see docker/api.Dockerfile); the group owns
+        # the mounted TLS Secret so 0440 files stay readable but not world-
+        # readable. Agent DaemonSets run as root and keep 0400.
+        fsGroup: 10001
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -37,6 +43,9 @@ spec:
             readOnlyRootFilesystem: true
           ports:
             - containerPort: 3000
+            {{- if .Values.api.tlsSecretName }}
+            - containerPort: 3001
+            {{- end }}
           env:
             {{- if .Values.postgres.enabled }}
             - name: PGUSER
@@ -131,16 +140,45 @@ spec:
               value: 0.0.0.0:3000
             - name: RUST_LOG
               value: info
+            {{- if .Values.api.tlsSecretName }}
+            - name: TLS_CERT
+              value: /tls/api/tls.crt
+            - name: TLS_KEY
+              value: /tls/api/tls.key
+            - name: CLIENT_CA_CERT
+              value: /tls/api/ca.crt
+            - name: INGEST_BIND_ADDR
+              value: 0.0.0.0:3001
+            {{- end }}
+          {{- if .Values.api.tlsSecretName }}
+          volumeMounts:
+            - name: api-tls
+              mountPath: /tls/api
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: 3000
+              {{- if .Values.api.tlsSecretName }}
+              scheme: HTTPS
+              {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
               port: 3000
+              {{- if .Values.api.tlsSecretName }}
+              scheme: HTTPS
+              {{- end }}
           resources:
             {{- .Values.api.resources | toYaml | nindent 12 }}
+      {{- if .Values.api.tlsSecretName }}
+      volumes:
+        - name: api-tls
+          secret:
+            secretName: {{ .Values.api.tlsSecretName | quote }}
+            defaultMode: 0440
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -156,3 +194,11 @@ spec:
   ports:
     - port: 3000
       targetPort: 3000
+      {{- if .Values.api.tlsSecretName }}
+      name: main
+      {{- end }}
+    {{- if .Values.api.tlsSecretName }}
+    - port: 3001
+      targetPort: 3001
+      name: ingest
+    {{- end }}

@@ -55,6 +55,14 @@ spec:
                   name: {{ .Values.agent.apiTokenSecretName | quote }}
                   key: ingest-token
             {{- end }}
+            {{- if .Values.agent.clientCertSecretName }}
+            - name: MIST_TLS_CERT
+              value: /tls/agent/tls.crt
+            - name: MIST_TLS_KEY
+              value: /tls/agent/tls.key
+            - name: MIST_TLS_CA_CERT
+              value: /tls/agent/ca.crt
+            {{- end }}
           args:
             - --object={{ .Values.agent.objectPath }}
             - --api-url={{ .Values.agent.apiUrl }}
@@ -63,10 +71,21 @@ spec:
             - name: sys
               mountPath: /sys
               readOnly: true
+            {{- if .Values.agent.clientCertSecretName }}
+            - name: agent-tls
+              mountPath: /tls/agent
+              readOnly: true
+            {{- end }}
           resources:
             {{- .Values.agent.resources | toYaml | nindent 12 }}
       volumes:
         - name: sys
           hostPath:
             path: /sys
+        {{- if .Values.agent.clientCertSecretName }}
+        - name: agent-tls
+          secret:
+            secretName: {{ .Values.agent.clientCertSecretName | quote }}
+            defaultMode: 0400
+        {{- end }}
 {{- end }}
